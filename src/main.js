@@ -30,20 +30,37 @@ function calculateAppHash() {
   }
 }
 
-// 2. SYSTEM-WIDE macOS NETWORK BLACKHOLE LOCKDOWN (Cuts internet for all other Mac apps)
+// 2. HARDWARE-LEVEL macOS NETWORK BLACKHOLE (Kills Internet for All Other Mac Apps)
+// It dynamically detects all network services (Wi-Fi, Ethernet, USB, etc.) and:
+// A. Sets DNS to 127.0.0.1 (Dead DNS - all domain lookups fail for Chrome, Safari, etc.)
+// B. Sets HTTP/HTTPS Web Proxies to 127.0.0.1:9999 (Dead Proxy - all sockets drop)
 function applySystemNetworkLockdown() {
   if (process.platform !== 'darwin') return
   try {
-    console.log('[Spektic macOS] Locking down system-wide internet for all other apps...')
+    console.log('[Spektic macOS] Executing Full System Internet Blackout for all other apps...')
     
-    // Set system HTTP/HTTPS proxy to dead blackhole address (127.0.0.1:9999) for all network services
-    const services = ['Wi-Fi', 'Ethernet', 'iPhone USB', 'Thunderbolt Bridge']
-    services.forEach((service) => {
-      exec(`networksetup -setwebproxy "${service}" 127.0.0.1 9999`, () => {})
-      exec(`networksetup -setsecurewebproxy "${service}" 127.0.0.1 9999`, () => {})
+    // Get all network hardware interfaces dynamically from macOS
+    exec('networksetup -listallnetworkservices', (err, stdout) => {
+      if (err || !stdout) return
+      
+      const services = stdout
+        .split('\n')
+        .map(s => s.trim())
+        .filter(s => s.length > 0 && !s.includes('*') && !s.includes('An asterisk'))
+
+      services.forEach((service) => {
+        // 1. Blackhole DNS (All external domain resolutions fail immediately)
+        exec(`networksetup -setdnsservers "${service}" 127.0.0.1`, () => {})
+        
+        // 2. Blackhole HTTP Proxy
+        exec(`networksetup -setwebproxy "${service}" 127.0.0.1 9999`, () => {})
+        
+        // 3. Blackhole Secure HTTPS Proxy
+        exec(`networksetup -setsecurewebproxy "${service}" 127.0.0.1 9999`, () => {})
+      })
     })
 
-    // Force Spektic to bypass the blackhole proxy and connect directly
+    // Spektic overrides the system dead proxy internally so ONLY Spektic has direct internet
     session.defaultSession.setProxy({
       proxyRules: 'direct://'
     })
@@ -55,16 +72,28 @@ function applySystemNetworkLockdown() {
 function restoreSystemNetworkLockdown() {
   if (process.platform !== 'darwin') return
   try {
-    console.log('[Spektic macOS] Restoring system-wide internet for normal apps...')
-    const services = ['Wi-Fi', 'Ethernet', 'iPhone USB', 'Thunderbolt Bridge']
-    services.forEach((service) => {
-      exec(`networksetup -setwebproxystate "${service}" off`, () => {})
-      exec(`networksetup -setsecurewebproxystate "${service}" off`, () => {})
+    console.log('[Spektic macOS] Restoring normal internet for all Mac apps...')
+    exec('networksetup -listallnetworkservices', (err, stdout) => {
+      if (err || !stdout) return
+      
+      const services = stdout
+        .split('\n')
+        .map(s => s.trim())
+        .filter(s => s.length > 0 && !s.includes('*') && !s.includes('An asterisk'))
+
+      services.forEach((service) => {
+        // 1. Restore DNS to automatic (Empty clears custom DNS)
+        exec(`networksetup -setdnsservers "${service}" "Empty"`, () => {})
+        
+        // 2. Turn off Web Proxies
+        exec(`networksetup -setwebproxystate "${service}" off`, () => {})
+        exec(`networksetup -setsecurewebproxystate "${service}" off`, () => {})
+      })
     })
   } catch (e) {}
 }
 
-// 3. Prohibited Apps (Google Chrome is explicitly EXCLUDED so you can test Chrome losing internet!)
+// 3. Comprehensive macOS Process Assassin (Excluding Google Chrome for testing)
 const PROHIBITED_MAC_APPS = [
   'Safari',
   'Firefox',
