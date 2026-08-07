@@ -2,7 +2,7 @@ const { app, BrowserWindow, globalShortcut, session, powerSaveBlocker, clipboard
 const path = require('path')
 const crypto = require('crypto')
 const fs = require('fs')
-const { exec } = require('child_process')
+const { exec, execSync } = require('child_process')
 
 // Disable Remote Debugging Port and UI Automation Scraping
 app.commandLine.appendSwitch('remote-debugging-port', '0')
@@ -30,8 +30,45 @@ function calculateAppHash() {
   }
 }
 
-// 2. Comprehensive macOS Process Assassin
+// 2. SYSTEM-WIDE macOS NETWORK BLACKHOLE LOCKDOWN (Cuts internet for all other Mac apps)
+function applySystemNetworkLockdown() {
+  if (process.platform !== 'darwin') return
+  try {
+    console.log('[Spektic macOS] Locking down system-wide internet for all other apps...')
+    
+    // Set system HTTP/HTTPS proxy to dead blackhole address (127.0.0.1:9999) for all network services
+    const services = ['Wi-Fi', 'Ethernet', 'iPhone USB', 'Thunderbolt Bridge']
+    services.forEach((service) => {
+      exec(`networksetup -setwebproxy "${service}" 127.0.0.1 9999`, () => {})
+      exec(`networksetup -setsecurewebproxy "${service}" 127.0.0.1 9999`, () => {})
+    })
+
+    // Force Spektic to bypass the blackhole proxy and connect directly
+    session.defaultSession.setProxy({
+      proxyRules: 'direct://'
+    })
+  } catch (e) {
+    console.error('[Spektic macOS] Network lockdown error:', e)
+  }
+}
+
+function restoreSystemNetworkLockdown() {
+  if (process.platform !== 'darwin') return
+  try {
+    console.log('[Spektic macOS] Restoring system-wide internet for normal apps...')
+    const services = ['Wi-Fi', 'Ethernet', 'iPhone USB', 'Thunderbolt Bridge']
+    services.forEach((service) => {
+      exec(`networksetup -setwebproxystate "${service}" off`, () => {})
+      exec(`networksetup -setsecurewebproxystate "${service}" off`, () => {})
+    })
+  } catch (e) {}
+}
+
+// 3. Comprehensive macOS Process Assassin (Includes Google Chrome & all browsers)
 const PROHIBITED_MAC_APPS = [
+  'Google Chrome',
+  'Google Chrome Canary',
+  'Chromium',
   'Safari',
   'Firefox',
   'Microsoft Edge',
@@ -82,7 +119,7 @@ function killProhibitedProcesses() {
   })
 }
 
-// 3. Multi-Monitor Secondary Screen Blackout Array
+// 4. Multi-Monitor Secondary Screen Blackout Array
 function createMultiMonitorBlackouts() {
   const displays = screen.getAllDisplays()
   const primaryDisplay = screen.getPrimaryDisplay()
@@ -113,9 +150,10 @@ function createMultiMonitorBlackouts() {
   })
 }
 
-// 4. Create Locked Down Primary Electron Window
+// 5. Create Locked Down Primary Electron Window
 function createWindow() {
   calculateAppHash()
+  applySystemNetworkLockdown()
 
   // Prevent display sleep during the exam
   powerBlockerId = powerSaveBlocker.start('prevent-display-sleep')
@@ -129,7 +167,7 @@ function createWindow() {
     frame: false,
     autoHideMenuBar: true,
     titleBarStyle: 'hidden',
-    trafficLightPosition: { x: -100, y: -100 }, // Completely hides the Mac red/yellow/green close buttons off screen!
+    trafficLightPosition: { x: -100, y: -100 },
     resizable: false,
     movable: false,
     minimizable: false,
@@ -146,7 +184,7 @@ function createWindow() {
   // CRITICAL MAC PROTECTION: Turn Zoom/Google Meet/OBS screen recording into a BLACK BOX!
   mainWindow.setContentProtection(true)
 
-  // Disable Right-Click Context Menu & Text-Lookup Context Menus
+  // Disable Right-Click Context Menu
   mainWindow.webContents.on('context-menu', (e) => {
     e.preventDefault()
   })
@@ -157,19 +195,20 @@ function createWindow() {
     return { action: 'deny' }
   })
 
-  // Intercept Navigation & Handle Clean Exit Immediately
+  // Intercept Navigation & Clean Instant Exit
   mainWindow.webContents.on('will-navigate', (event, url) => {
     const lowerUrl = url.toLowerCase()
     
-    // Check if the user clicked the Exit Exam button
+    // Clean Exit Handler
     if (lowerUrl.includes('spektic-quit-action') || lowerUrl.includes('quit-exam')) {
       event.preventDefault()
-      console.log('[Spektic macOS] Force Quitting Spektic immediately!')
+      console.log('[Spektic macOS] Force Quitting Spektic and restoring network...')
+      restoreSystemNetworkLockdown()
       if (processWatchdogTimer) clearInterval(processWatchdogTimer)
       if (clipboardTimer) clearInterval(clipboardTimer)
       if (powerBlockerId !== null) powerSaveBlocker.stop(powerBlockerId)
       globalShortcut.unregisterAll()
-      app.exit(0) // Instant hard termination
+      app.exit(0)
       return
     }
 
@@ -190,7 +229,7 @@ function createWindow() {
     event.preventDefault()
   })
 
-  // 5. Inject Dynamic SHA-256 Hash into Cloudflare Worker Headers
+  // 6. Inject Dynamic SHA-256 Hash into Cloudflare Worker Headers
   session.defaultSession.webRequest.onBeforeSendHeaders(
     { urls: ['https://*/*', 'http://*/*'] },
     (details, callback) => {
@@ -219,18 +258,19 @@ function createWindow() {
   const TARGET_URL = 'https://spektic.com/join'
   mainWindow.loadURL(TARGET_URL)
 
-  // 6. INJECT SECURITY CSS & 1-CLICK INSTANT EXIT BUTTON
+  // 7. INJECT SECURITY CSS & 1-CLICK INSTANT EXIT BUTTON
   mainWindow.webContents.on('did-finish-load', () => {
-    // Disable Siri / QuickLook / Data Detectors / Dictionary Popup
     mainWindow.webContents.insertCSS(`
       * {
         -webkit-touch-callout: none !important;
         -webkit-user-select: none !important;
         user-select: none !important;
+        cursor: none !important; /* Hide OS Cursor System-Wide on Exam */
       }
       input, textarea {
         -webkit-user-select: auto !important;
         user-select: auto !important;
+        cursor: auto !important;
       }
       /* Custom Instant Exit Button */
       #spektic-exit-btn {
@@ -246,7 +286,7 @@ function createWindow() {
         font-size: 14px;
         font-weight: 800;
         border-radius: 8px;
-        cursor: pointer;
+        cursor: pointer !important;
         box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
       }
       #spektic-exit-btn:hover {
@@ -254,7 +294,6 @@ function createWindow() {
       }
     `)
 
-    // Inject direct Exit button that triggers app.exit(0) instantly
     mainWindow.webContents.executeJavaScript(`
       if (!document.getElementById('spektic-exit-btn')) {
         const exitBtn = document.createElement('button');
@@ -268,11 +307,12 @@ function createWindow() {
     `)
   })
 
-  // 7. macOS Keyboard Trap
+  // 8. macOS Keyboard Trap
   mainWindow.webContents.on('before-input-event', (event, input) => {
     // Secret Emergency Exit Hotkey: Command + Shift + Option + Q
     if (input.meta && input.shift && input.alt && input.key.toLowerCase() === 'q') {
       console.log('[Spektic macOS] Developer Emergency Quit Triggered')
+      restoreSystemNetworkLockdown()
       app.exit(0)
       return
     }
@@ -299,7 +339,7 @@ function createWindow() {
   // Cover secondary displays with blackout shields
   createMultiMonitorBlackouts()
 
-  // Start 2-Second Process Watchdog
+  // Start 2-Second Process Watchdog (Kills all prohibited apps)
   processWatchdogTimer = setInterval(killProhibitedProcesses, 2000)
 
   // Start 2-Second Aggressive Clipboard Eraser
@@ -310,7 +350,7 @@ function createWindow() {
   }, 2000)
 }
 
-// 8. System Initialization & Global Shortcut Lockdown
+// 9. System Initialization & Global Shortcut Lockdown
 app.whenReady().then(() => {
   const shortcutsToBlock = [
     'Command+Tab',
@@ -335,6 +375,7 @@ app.whenReady().then(() => {
   try {
     globalShortcut.register('Command+Shift+Option+Q', () => {
       console.log('[Spektic macOS] Global Emergency Quit Triggered')
+      restoreSystemNetworkLockdown()
       app.exit(0)
     })
   } catch (e) {}
@@ -343,6 +384,7 @@ app.whenReady().then(() => {
 })
 
 app.on('will-quit', () => {
+  restoreSystemNetworkLockdown()
   if (processWatchdogTimer) clearInterval(processWatchdogTimer)
   if (clipboardTimer) clearInterval(clipboardTimer)
   if (powerBlockerId !== null) powerSaveBlocker.stop(powerBlockerId)
@@ -350,6 +392,7 @@ app.on('will-quit', () => {
 })
 
 app.on('window-all-closed', () => {
+  restoreSystemNetworkLockdown()
   if (process.platform !== 'darwin') {
     app.exit(0)
   }
