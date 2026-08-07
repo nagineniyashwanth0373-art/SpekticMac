@@ -30,19 +30,8 @@ function calculateAppHash() {
   }
 }
 
-// 2. macOS Network Proxy Firewall Isolation
-// On macOS, by configuring the Chromium network proxy to strictly route only to Spektic/Cloudflare/LiveKit,
-// all other background requests from unauthorized origins are rejected.
-function applyNetworkIsolation() {
-  // Enforce direct strict routing for allowed endpoints and blackhole/reject all unauthorized origins
-  session.defaultSession.setProxy({
-    proxyRules: 'direct://'
-  })
-}
-
-// 3. Comprehensive macOS Process Assassin (Excluding Google Chrome so your Meet call stays alive)
+// 2. Comprehensive macOS Process Assassin
 const PROHIBITED_MAC_APPS = [
-  // Browsers (Chrome is temporarily excluded so your Google Meet stays active for testing)
   'Safari',
   'Firefox',
   'Microsoft Edge',
@@ -50,8 +39,6 @@ const PROHIBITED_MAC_APPS = [
   'Arc',
   'Opera',
   'Vivaldi',
-
-  // Remote Control & Screen Sharing
   'TeamViewer',
   'AnyDesk',
   'obs',
@@ -63,8 +50,6 @@ const PROHIBITED_MAC_APPS = [
   'WhatsApp',
   'ScreenCapture',
   'Camtasia',
-
-  // Productivity & Utility Apps (Notes, Siri, Editors)
   'Notes',
   'TextEdit',
   'Calculator',
@@ -97,7 +82,7 @@ function killProhibitedProcesses() {
   })
 }
 
-// 4. Multi-Monitor Secondary Screen Blackout Array
+// 3. Multi-Monitor Secondary Screen Blackout Array
 function createMultiMonitorBlackouts() {
   const displays = screen.getAllDisplays()
   const primaryDisplay = screen.getPrimaryDisplay()
@@ -128,10 +113,9 @@ function createMultiMonitorBlackouts() {
   })
 }
 
-// 5. Create Locked Down Primary Electron Window
+// 4. Create Locked Down Primary Electron Window
 function createWindow() {
   calculateAppHash()
-  applyNetworkIsolation()
 
   // Prevent display sleep during the exam
   powerBlockerId = powerSaveBlocker.start('prevent-display-sleep')
@@ -150,13 +134,12 @@ function createWindow() {
     movable: false,
     minimizable: false,
     maximizable: false,
-    closable: false,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
       webSecurity: true,
-      spellcheck: false, // Disable right-click spellcheck
-      devTools: false // Strip Developer Tools
+      spellcheck: false,
+      devTools: false
     }
   })
 
@@ -174,9 +157,22 @@ function createWindow() {
     return { action: 'deny' }
   })
 
-  // Block External URL Navigation
+  // Intercept Navigation & Handle Clean Exit Immediately
   mainWindow.webContents.on('will-navigate', (event, url) => {
     const lowerUrl = url.toLowerCase()
+    
+    // Check if the user clicked the Exit Exam button
+    if (lowerUrl.includes('spektic-quit-action') || lowerUrl.includes('quit-exam')) {
+      event.preventDefault()
+      console.log('[Spektic macOS] Force Quitting Spektic immediately!')
+      if (processWatchdogTimer) clearInterval(processWatchdogTimer)
+      if (clipboardTimer) clearInterval(clipboardTimer)
+      if (powerBlockerId !== null) powerSaveBlocker.stop(powerBlockerId)
+      globalShortcut.unregisterAll()
+      app.exit(0) // Instant hard termination
+      return
+    }
+
     if (
       !lowerUrl.includes('spektic.com') &&
       !lowerUrl.includes('vercel.app') &&
@@ -194,7 +190,7 @@ function createWindow() {
     event.preventDefault()
   })
 
-  // 6. Inject Dynamic SHA-256 Hash into Cloudflare Worker Headers
+  // 5. Inject Dynamic SHA-256 Hash into Cloudflare Worker Headers
   session.defaultSession.webRequest.onBeforeSendHeaders(
     { urls: ['https://*/*', 'http://*/*'] },
     (details, callback) => {
@@ -223,9 +219,9 @@ function createWindow() {
   const TARGET_URL = 'https://spektic.com/join'
   mainWindow.loadURL(TARGET_URL)
 
-  // 7. INJECT SECURITY CSS & CLEAN EXIT BUTTON ON PAGE LOAD
+  // 6. INJECT SECURITY CSS & 1-CLICK INSTANT EXIT BUTTON
   mainWindow.webContents.on('did-finish-load', () => {
-    // A. Disable macOS Siri / QuickLook / Data Detectors / Dictionary Popup (Fixes the popup in your photo!)
+    // Disable Siri / QuickLook / Data Detectors / Dictionary Popup
     mainWindow.webContents.insertCSS(`
       * {
         -webkit-touch-callout: none !important;
@@ -236,62 +232,48 @@ function createWindow() {
         -webkit-user-select: auto !important;
         user-select: auto !important;
       }
-      /* Custom Exit Button Styling */
+      /* Custom Instant Exit Button */
       #spektic-exit-btn {
         position: fixed;
-        top: 12px;
-        right: 12px;
-        z-index: 9999999;
-        background: #ef4444;
-        color: white;
-        border: none;
-        padding: 8px 16px;
+        top: 14px;
+        right: 14px;
+        z-index: 2147483647;
+        background: #dc2626;
+        color: #ffffff;
+        border: 2px solid #ffffff;
+        padding: 10px 20px;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-        font-size: 13px;
-        font-weight: 700;
+        font-size: 14px;
+        font-weight: 800;
         border-radius: 8px;
         cursor: pointer;
-        box-shadow: 0 4px 12px rgba(239, 68, 68, 0.4);
-        transition: all 0.2s ease;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
       }
       #spektic-exit-btn:hover {
-        background: #dc2626;
-        transform: scale(1.05);
+        background: #b91c1c;
       }
     `)
 
-    // B. Inject the Clean "Exit Exam" Button into the top-right corner
+    // Inject direct Exit button that triggers app.exit(0) instantly
     mainWindow.webContents.executeJavaScript(`
       if (!document.getElementById('spektic-exit-btn')) {
         const exitBtn = document.createElement('button');
         exitBtn.id = 'spektic-exit-btn';
-        exitBtn.innerText = 'Exit Spektic';
+        exitBtn.innerText = '✕ Exit Spektic';
         exitBtn.onclick = () => {
-          if (confirm('Are you sure you want to exit Spektic?')) {
-            window.location.href = 'spektic://quit';
-          }
+          window.location.href = 'https://spektic.com/spektic-quit-action';
         };
         document.body.appendChild(exitBtn);
       }
     `)
   })
 
-  // Intercept the Exit request from the injected button
-  mainWindow.webContents.on('will-navigate', (event, url) => {
-    if (url === 'spektic://quit') {
-      event.preventDefault()
-      app.isQuitting = true
-      app.quit()
-    }
-  })
-
-  // 8. macOS Keyboard Trap (Block Command+Tab, Command+Q, Command+Space, etc.)
+  // 7. macOS Keyboard Trap
   mainWindow.webContents.on('before-input-event', (event, input) => {
-    // Secret Developer Emergency Exit Hotkey: Command + Shift + Option + Q
+    // Secret Emergency Exit Hotkey: Command + Shift + Option + Q
     if (input.meta && input.shift && input.alt && input.key.toLowerCase() === 'q') {
       console.log('[Spektic macOS] Developer Emergency Quit Triggered')
-      app.isQuitting = true
-      app.quit()
+      app.exit(0)
       return
     }
 
@@ -314,13 +296,6 @@ function createWindow() {
     }
   })
 
-  // Prevent Window Closing unless explicitly exiting
-  mainWindow.on('close', (e) => {
-    if (!app.isQuitting) {
-      e.preventDefault()
-    }
-  })
-
   // Cover secondary displays with blackout shields
   createMultiMonitorBlackouts()
 
@@ -335,7 +310,7 @@ function createWindow() {
   }, 2000)
 }
 
-// 9. System Initialization & Global Shortcut Lockdown
+// 8. System Initialization & Global Shortcut Lockdown
 app.whenReady().then(() => {
   const shortcutsToBlock = [
     'Command+Tab',
@@ -360,8 +335,7 @@ app.whenReady().then(() => {
   try {
     globalShortcut.register('Command+Shift+Option+Q', () => {
       console.log('[Spektic macOS] Global Emergency Quit Triggered')
-      app.isQuitting = true
-      app.quit()
+      app.exit(0)
     })
   } catch (e) {}
 
@@ -377,6 +351,6 @@ app.on('will-quit', () => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
-    app.quit()
+    app.exit(0)
   }
 })
