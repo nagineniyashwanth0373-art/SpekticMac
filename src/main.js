@@ -4,6 +4,10 @@ const crypto = require('crypto')
 const fs = require('fs')
 const { exec } = require('child_process')
 
+// Disable Remote Debugging Port Command-Line Injection
+app.commandLine.appendSwitch('remote-debugging-port', '0')
+app.commandLine.appendSwitch('disable-renderer-accessibility', '1')
+
 let mainWindow
 let appHash = ''
 let processWatchdogTimer = null
@@ -67,7 +71,6 @@ const PROHIBITED_MAC_APPS = [
 function killProhibitedProcesses() {
   if (process.platform !== 'darwin') return
 
-  // Query running processes using native OS ps command
   exec('ps -ax -o comm=', (err, stdout) => {
     if (err || !stdout) return
 
@@ -139,12 +142,39 @@ function createWindow() {
       nodeIntegration: false,
       contextIsolation: true,
       webSecurity: true,
+      spellcheck: false, // Disable right-click spellcheck suggestions
       devTools: false // Strip Developer Tools
     }
   })
 
   // CRITICAL MAC PROTECTION: Turn Zoom/Google Meet/OBS screen recording into a BLACK BOX!
   mainWindow.setContentProtection(true)
+
+  // Block Popups and New Windows
+  mainWindow.webContents.setWindowOpenHandler(() => {
+    console.log('[Spektic macOS] Blocked Popup / New Window Request')
+    return { action: 'deny' }
+  })
+
+  // Block External URL Navigation
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    const lowerUrl = url.toLowerCase()
+    if (
+      !lowerUrl.includes('spektic.com') &&
+      !lowerUrl.includes('vercel.app') &&
+      !lowerUrl.includes('workers.dev') &&
+      !lowerUrl.includes('localhost')
+    ) {
+      console.log(`[Spektic macOS] Blocked Navigation to: ${url}`)
+      event.preventDefault()
+    }
+  })
+
+  // Block File Downloads on macOS
+  session.defaultSession.on('will-download', (event) => {
+    console.log('[Spektic macOS] Blocked File Download Request')
+    event.preventDefault()
+  })
 
   // 5. Inject Dynamic SHA-256 Hash into Cloudflare Worker Headers
   session.defaultSession.webRequest.onBeforeSendHeaders(
