@@ -16,24 +16,18 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
-          cache: 'npm'
-          cache-dependency-path: 'SpekticMac/package-lock.json'
+          node-version: 22
 
       - name: Install Dependencies
-        run: |
-          cd SpekticMac
-          npm install
+        run: npm install
 
       - name: Build macOS Installer (.dmg)
-        run: |
-          cd SpekticMac
-          npm run build:mac
+        run: npm run build:mac
 
       - name: Upload .dmg Artifact
         uses: actions/upload-artifact@v4
         with:
           name: Spektic-macOS-Installer
           path: |
-            SpekticMac/dist/*.dmg
-            SpekticMac/dist/*.zip
+            dist/*.dmg
+            dist/*.zip
