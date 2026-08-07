@@ -5,6 +5,9 @@ on:
     branches: [ main, master ]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-mac:
     runs-on: macos-latest
@@ -24,10 +27,21 @@ jobs:
       - name: Build macOS Installer (.dmg)
         run: npm run build:mac
 
-      - name: Upload .dmg Artifact
+      - name: Upload Single Artifact File
         uses: actions/upload-artifact@v4
         with:
-          name: Spektic-macOS-Installer
-          path: |
-            dist/*.dmg
-            dist/*.zip
+          name: Spektic-Mac-Installer
+          path: dist/Spektic-1.0.0-arm64.dmg
+
+      - name: Create Direct Download GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.0
+          name: Spektic macOS Installer v1.0.0
+          draft: false
+          prerelease: false
+          files: |
+            dist/Spektic-1.0.0-arm64.dmg
+            dist/Spektic-1.0.0.dmg
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
