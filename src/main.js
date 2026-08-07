@@ -1,10 +1,10 @@
-const { app, BrowserWindow, globalShortcut, session, powerSaveBlocker, clipboard, screen } = require('electron')
+const { app, BrowserWindow, globalShortcut, session, powerSaveBlocker, clipboard, screen, ipcMain } = require('electron')
 const path = require('path')
 const crypto = require('crypto')
 const fs = require('fs')
 const { exec } = require('child_process')
 
-// Disable Remote Debugging Port Command-Line Injection
+// Disable Remote Debugging Port and UI Automation Scraping
 app.commandLine.appendSwitch('remote-debugging-port', '0')
 app.commandLine.appendSwitch('disable-renderer-accessibility', '1')
 
@@ -30,10 +30,9 @@ function calculateAppHash() {
   }
 }
 
-// 2. Comprehensive macOS Process Assassin (Murder All Browsers & Cheating Tools)
+// 2. Comprehensive macOS Process Assassin (Excluding Google Chrome so your Meet call stays alive)
 const PROHIBITED_MAC_APPS = [
-  // Browsers (Prevent opening external web resources)
-  'Google Chrome',
+  // Browsers (Chrome is temporarily excluded so your Google Meet stays active for testing)
   'Safari',
   'Firefox',
   'Microsoft Edge',
@@ -55,7 +54,7 @@ const PROHIBITED_MAC_APPS = [
   'ScreenCapture',
   'Camtasia',
 
-  // Productivity & Utility Apps (Prevent reading local notes)
+  // Productivity & Utility Apps (Notes, Siri, Editors)
   'Notes',
   'TextEdit',
   'Calculator',
@@ -65,7 +64,8 @@ const PROHIBITED_MAC_APPS = [
   'Sublime Text',
   'VSCode',
   'Terminal',
-  'iTerm'
+  'iTerm',
+  'Activity Monitor'
 ]
 
 function killProhibitedProcesses() {
@@ -129,10 +129,12 @@ function createWindow() {
     width: 1280,
     height: 800,
     fullscreen: true,
-    kiosk: true, // macOS Kiosk Mode: Hides Menu Bar, Dock, & Mission Control gestures
-    alwaysOnTop: true, // Keeps window Z-index on top of macOS desktop
+    kiosk: true, // macOS Kiosk Mode
+    alwaysOnTop: true, // Keeps window on top
     frame: false,
     autoHideMenuBar: true,
+    titleBarStyle: 'hidden',
+    trafficLightPosition: { x: -100, y: -100 }, // Completely hides the Mac red/yellow/green close buttons off screen!
     resizable: false,
     movable: false,
     minimizable: false,
@@ -142,13 +144,18 @@ function createWindow() {
       nodeIntegration: false,
       contextIsolation: true,
       webSecurity: true,
-      spellcheck: false, // Disable right-click spellcheck suggestions
+      spellcheck: false, // Disable right-click spellcheck
       devTools: false // Strip Developer Tools
     }
   })
 
   // CRITICAL MAC PROTECTION: Turn Zoom/Google Meet/OBS screen recording into a BLACK BOX!
   mainWindow.setContentProtection(true)
+
+  // Disable Right-Click Context Menu & Text-Lookup Context Menus
+  mainWindow.webContents.on('context-menu', (e) => {
+    e.preventDefault()
+  })
 
   // Block Popups and New Windows
   mainWindow.webContents.setWindowOpenHandler(() => {
@@ -205,8 +212,78 @@ function createWindow() {
   const TARGET_URL = 'https://spektic.com/join'
   mainWindow.loadURL(TARGET_URL)
 
-  // 6. macOS Keyboard Trap (Block Command+Tab, Command+Q, Command+Space, etc.)
+  // 6. INJECT SECURITY CSS & CLEAN EXIT BUTTON ON PAGE LOAD
+  mainWindow.webContents.on('did-finish-load', () => {
+    // A. Disable macOS Siri / QuickLook / Data Detectors / Dictionary Popup (Fixes the popup in your photo!)
+    mainWindow.webContents.insertCSS(`
+      * {
+        -webkit-touch-callout: none !important;
+        -webkit-user-select: none !important;
+        user-select: none !important;
+      }
+      input, textarea {
+        -webkit-user-select: auto !important;
+        user-select: auto !important;
+      }
+      /* Custom Exit Button Styling */
+      #spektic-exit-btn {
+        position: fixed;
+        top: 12px;
+        right: 12px;
+        z-index: 9999999;
+        background: #ef4444;
+        color: white;
+        border: none;
+        padding: 8px 16px;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        font-size: 13px;
+        font-weight: 700;
+        border-radius: 8px;
+        cursor: pointer;
+        box-shadow: 0 4px 12px rgba(239, 68, 68, 0.4);
+        transition: all 0.2s ease;
+      }
+      #spektic-exit-btn:hover {
+        background: #dc2626;
+        transform: scale(1.05);
+      }
+    `)
+
+    // B. Inject the Clean "Exit Exam" Button into the top-right corner
+    mainWindow.webContents.executeJavaScript(`
+      if (!document.getElementById('spektic-exit-btn')) {
+        const exitBtn = document.createElement('button');
+        exitBtn.id = 'spektic-exit-btn';
+        exitBtn.innerText = 'Exit Spektic';
+        exitBtn.onclick = () => {
+          if (confirm('Are you sure you want to exit Spektic?')) {
+            window.location.href = 'spektic://quit';
+          }
+        };
+        document.body.appendChild(exitBtn);
+      }
+    `)
+  })
+
+  // Intercept the Exit request from the injected button
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (url === 'spektic://quit') {
+      event.preventDefault()
+      app.isQuitting = true
+      app.quit()
+    }
+  })
+
+  // 7. macOS Keyboard Trap (Block Command+Tab, Command+Q, Command+Space, etc.)
   mainWindow.webContents.on('before-input-event', (event, input) => {
+    // Secret Developer Emergency Exit Hotkey: Command + Shift + Option + Q
+    if (input.meta && input.shift && input.alt && input.key.toLowerCase() === 'q') {
+      console.log('[Spektic macOS] Developer Emergency Quit Triggered')
+      app.isQuitting = true
+      app.quit()
+      return
+    }
+
     if (input.meta || input.alt || input.control) {
       const key = input.key.toLowerCase()
       if (
@@ -226,9 +303,11 @@ function createWindow() {
     }
   })
 
-  // Prevent Window Closing
+  // Prevent Window Closing unless explicitly exiting
   mainWindow.on('close', (e) => {
-    e.preventDefault()
+    if (!app.isQuitting) {
+      e.preventDefault()
+    }
   })
 
   // Cover secondary displays with blackout shields
@@ -245,7 +324,7 @@ function createWindow() {
   }, 2000)
 }
 
-// 7. System Initialization & Hotkey Lockdown
+// 8. System Initialization & Global Shortcut Lockdown
 app.whenReady().then(() => {
   const shortcutsToBlock = [
     'Command+Tab',
@@ -265,6 +344,15 @@ app.whenReady().then(() => {
       })
     } catch (e) {}
   })
+
+  // Secret Emergency Exit Hotkey: Command + Shift + Option + Q
+  try {
+    globalShortcut.register('Command+Shift+Option+Q', () => {
+      console.log('[Spektic macOS] Global Emergency Quit Triggered')
+      app.isQuitting = true
+      app.quit()
+    })
+  } catch (e) {}
 
   createWindow()
 })
