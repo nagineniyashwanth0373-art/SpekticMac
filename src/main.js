@@ -1,4 +1,4 @@
-const { app, BrowserWindow, globalShortcut, session, systemPreferences } = require('electron')
+const { app, BrowserWindow, globalShortcut, session, powerSaveBlocker, clipboard, screen } = require('electron')
 const path = require('path')
 const crypto = require('crypto')
 const fs = require('fs')
@@ -7,6 +7,9 @@ const { exec } = require('child_process')
 let mainWindow
 let appHash = ''
 let processWatchdogTimer = null
+let clipboardTimer = null
+let powerBlockerId = null
+let blackoutWindows = []
 
 // 1. Calculate SHA-256 Hash of this application script
 function calculateAppHash() {
@@ -23,24 +26,46 @@ function calculateAppHash() {
   }
 }
 
-// 2. Prohibited macOS Process Assassin
+// 2. Comprehensive macOS Process Assassin (Murder All Browsers & Cheating Tools)
 const PROHIBITED_MAC_APPS = [
-  'Discord',
+  // Browsers (Prevent opening external web resources)
+  'Google Chrome',
+  'Safari',
+  'Firefox',
+  'Microsoft Edge',
+  'Brave Browser',
+  'Arc',
+  'Opera',
+  'Vivaldi',
+
+  // Remote Control & Screen Sharing
   'TeamViewer',
   'AnyDesk',
   'obs',
-  'Spotify',
-  'Slack',
   'Zoom',
   'Skype',
+  'Slack',
+  'Discord',
   'Telegram',
   'WhatsApp',
   'ScreenCapture',
-  'Camtasia'
+  'Camtasia',
+
+  // Productivity & Utility Apps (Prevent reading local notes)
+  'Notes',
+  'TextEdit',
+  'Calculator',
+  'Pages',
+  'Microsoft Word',
+  'Preview',
+  'Sublime Text',
+  'VSCode',
+  'Terminal',
+  'iTerm'
 ]
 
 function killProhibitedProcesses() {
-  if (process.platform !== 'darwin' && process.platform !== 'win32') return
+  if (process.platform !== 'darwin') return
 
   // Query running processes using native OS ps command
   exec('ps -ax -o comm=', (err, stdout) => {
@@ -59,9 +84,43 @@ function killProhibitedProcesses() {
   })
 }
 
-// 3. Create Locked Down Electron Window
+// 3. Multi-Monitor Secondary Screen Blackout Array
+function createMultiMonitorBlackouts() {
+  const displays = screen.getAllDisplays()
+  const primaryDisplay = screen.getPrimaryDisplay()
+
+  displays.forEach((display) => {
+    if (display.id !== primaryDisplay.id) {
+      const blackout = new BrowserWindow({
+        x: display.bounds.x,
+        y: display.bounds.y,
+        width: display.bounds.width,
+        height: display.bounds.height,
+        fullscreen: true,
+        kiosk: true,
+        alwaysOnTop: true,
+        frame: false,
+        backgroundColor: '#000000',
+        resizable: false,
+        movable: false,
+        minimizable: false,
+        maximizable: false,
+        closable: false
+      })
+
+      blackout.setContentProtection(true)
+      blackout.loadURL('data:text/html,<html><body style="background-color:black;margin:0;padding:0;"></body></html>')
+      blackoutWindows.push(blackout)
+    }
+  })
+}
+
+// 4. Create Locked Down Primary Electron Window
 function createWindow() {
   calculateAppHash()
+
+  // Prevent display sleep during the exam
+  powerBlockerId = powerSaveBlocker.start('prevent-display-sleep')
 
   mainWindow = new BrowserWindow({
     width: 1280,
@@ -87,7 +146,7 @@ function createWindow() {
   // CRITICAL MAC PROTECTION: Turn Zoom/Google Meet/OBS screen recording into a BLACK BOX!
   mainWindow.setContentProtection(true)
 
-  // 4. Inject Dynamic SHA-256 Hash into Cloudflare Worker Headers
+  // 5. Inject Dynamic SHA-256 Hash into Cloudflare Worker Headers
   session.defaultSession.webRequest.onBeforeSendHeaders(
     { urls: ['https://*/*', 'http://*/*'] },
     (details, callback) => {
@@ -116,10 +175,9 @@ function createWindow() {
   const TARGET_URL = 'https://spektic.com/join'
   mainWindow.loadURL(TARGET_URL)
 
-  // 5. macOS Keyboard Trap (Block Command+Tab, Command+Q, Command+Space)
+  // 6. macOS Keyboard Trap (Block Command+Tab, Command+Q, Command+Space, etc.)
   mainWindow.webContents.on('before-input-event', (event, input) => {
     if (input.meta || input.alt || input.control) {
-      // Input.meta = Command key on Mac
       const key = input.key.toLowerCase()
       if (
         key === 'tab' ||
@@ -128,7 +186,9 @@ function createWindow() {
         key === 'space' ||
         key === 'r' ||
         key === 'h' ||
-        key === 'm'
+        key === 'm' ||
+        key === 'c' ||
+        key === 'v'
       ) {
         console.log(`[Spektic macOS] Blocked Shortcut: Cmd+${key}`)
         event.preventDefault()
@@ -141,12 +201,22 @@ function createWindow() {
     e.preventDefault()
   })
 
+  // Cover secondary displays with blackout shields
+  createMultiMonitorBlackouts()
+
   // Start 2-Second Process Watchdog
   processWatchdogTimer = setInterval(killProhibitedProcesses, 2000)
+
+  // Start 2-Second Aggressive Clipboard Eraser
+  clipboardTimer = setInterval(() => {
+    try {
+      clipboard.clear()
+    } catch (e) {}
+  }, 2000)
 }
 
+// 7. System Initialization & Hotkey Lockdown
 app.whenReady().then(() => {
-  // Register macOS System Global Shortcuts Lockdown
   const shortcutsToBlock = [
     'Command+Tab',
     'Command+Q',
@@ -155,7 +225,7 @@ app.whenReady().then(() => {
     'Command+Option+Esc', // Force Quit Menu
     'Command+Shift+3', // Screenshot
     'Command+Shift+4', // Screenshot Snipping
-    'Command+Shift+5'  // Screen Recording Bar
+    'Command+Shift+5' // Screen Recording Bar
   ]
 
   shortcutsToBlock.forEach((sc) => {
@@ -171,6 +241,8 @@ app.whenReady().then(() => {
 
 app.on('will-quit', () => {
   if (processWatchdogTimer) clearInterval(processWatchdogTimer)
+  if (clipboardTimer) clearInterval(clipboardTimer)
+  if (powerBlockerId !== null) powerSaveBlocker.stop(powerBlockerId)
   globalShortcut.unregisterAll()
 })
 
