@@ -64,11 +64,8 @@ function restoreSystemNetworkLockdown() {
   } catch (e) {}
 }
 
-// 3. Comprehensive macOS Process Assassin (Includes Google Chrome & all browsers)
+// 3. Prohibited Apps (Google Chrome is explicitly EXCLUDED so you can test Chrome losing internet!)
 const PROHIBITED_MAC_APPS = [
-  'Google Chrome',
-  'Google Chrome Canary',
-  'Chromium',
   'Safari',
   'Firefox',
   'Microsoft Edge',
