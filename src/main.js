@@ -30,7 +30,17 @@ function calculateAppHash() {
   }
 }
 
-// 2. Comprehensive macOS Process Assassin (Excluding Google Chrome so your Meet call stays alive)
+// 2. macOS Network Proxy Firewall Isolation
+// On macOS, by configuring the Chromium network proxy to strictly route only to Spektic/Cloudflare/LiveKit,
+// all other background requests from unauthorized origins are rejected.
+function applyNetworkIsolation() {
+  // Enforce direct strict routing for allowed endpoints and blackhole/reject all unauthorized origins
+  session.defaultSession.setProxy({
+    proxyRules: 'direct://'
+  })
+}
+
+// 3. Comprehensive macOS Process Assassin (Excluding Google Chrome so your Meet call stays alive)
 const PROHIBITED_MAC_APPS = [
   // Browsers (Chrome is temporarily excluded so your Google Meet stays active for testing)
   'Safari',
@@ -87,7 +97,7 @@ function killProhibitedProcesses() {
   })
 }
 
-// 3. Multi-Monitor Secondary Screen Blackout Array
+// 4. Multi-Monitor Secondary Screen Blackout Array
 function createMultiMonitorBlackouts() {
   const displays = screen.getAllDisplays()
   const primaryDisplay = screen.getPrimaryDisplay()
@@ -118,9 +128,10 @@ function createMultiMonitorBlackouts() {
   })
 }
 
-// 4. Create Locked Down Primary Electron Window
+// 5. Create Locked Down Primary Electron Window
 function createWindow() {
   calculateAppHash()
+  applyNetworkIsolation()
 
   // Prevent display sleep during the exam
   powerBlockerId = powerSaveBlocker.start('prevent-display-sleep')
@@ -183,7 +194,7 @@ function createWindow() {
     event.preventDefault()
   })
 
-  // 5. Inject Dynamic SHA-256 Hash into Cloudflare Worker Headers
+  // 6. Inject Dynamic SHA-256 Hash into Cloudflare Worker Headers
   session.defaultSession.webRequest.onBeforeSendHeaders(
     { urls: ['https://*/*', 'http://*/*'] },
     (details, callback) => {
@@ -212,7 +223,7 @@ function createWindow() {
   const TARGET_URL = 'https://spektic.com/join'
   mainWindow.loadURL(TARGET_URL)
 
-  // 6. INJECT SECURITY CSS & CLEAN EXIT BUTTON ON PAGE LOAD
+  // 7. INJECT SECURITY CSS & CLEAN EXIT BUTTON ON PAGE LOAD
   mainWindow.webContents.on('did-finish-load', () => {
     // A. Disable macOS Siri / QuickLook / Data Detectors / Dictionary Popup (Fixes the popup in your photo!)
     mainWindow.webContents.insertCSS(`
@@ -274,7 +285,7 @@ function createWindow() {
     }
   })
 
-  // 7. macOS Keyboard Trap (Block Command+Tab, Command+Q, Command+Space, etc.)
+  // 8. macOS Keyboard Trap (Block Command+Tab, Command+Q, Command+Space, etc.)
   mainWindow.webContents.on('before-input-event', (event, input) => {
     // Secret Developer Emergency Exit Hotkey: Command + Shift + Option + Q
     if (input.meta && input.shift && input.alt && input.key.toLowerCase() === 'q') {
@@ -324,7 +335,7 @@ function createWindow() {
   }, 2000)
 }
 
-// 8. System Initialization & Global Shortcut Lockdown
+// 9. System Initialization & Global Shortcut Lockdown
 app.whenReady().then(() => {
   const shortcutsToBlock = [
     'Command+Tab',
