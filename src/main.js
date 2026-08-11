@@ -128,8 +128,10 @@ function setupNetworkSecurity() {
   })
 }
 
-// 6. Concurrency-Safe Process Assassin (Kills browsers & cheating tools without process pileups)
+// 6. Complete macOS Prohibited Process List (Safe Exam Browser Standard)
+// Automatically assassinates all screen capture agents, audio broadcasters, and communication apps
 const PROHIBITED_MAC_APPS = [
+  // Browsers & Google Meet Hosts
   'Google Chrome',
   'Google Chrome Canary',
   'Chromium',
@@ -140,17 +142,34 @@ const PROHIBITED_MAC_APPS = [
   'Arc',
   'Opera',
   'Vivaldi',
-  'TeamViewer',
-  'AnyDesk',
+
+  // macOS Screen Capture & Mirroring Daemons
+  'ScreenCaptureAgent',
+  'screencapture',
+  'AirPlayUIAgent',
+  'TouchBarAgent',
+  'QuickTime Player',
+  'Loom',
+  'Screenflow',
+  'Camtasia',
   'obs',
+  'obs64',
+
+  // Video Calling & Communication Tools
   'Zoom',
+  'zoom.us',
+  'Microsoft Teams',
+  'FaceTime',
+  'Webex',
   'Skype',
   'Slack',
   'Discord',
   'Telegram',
   'WhatsApp',
-  'ScreenCapture',
-  'Camtasia',
+  'TeamViewer',
+  'AnyDesk',
+
+  // Notes, Editors & Text Extraction
   'Notes',
   'TextEdit',
   'Calculator',
@@ -177,7 +196,7 @@ function killProhibitedProcesses() {
       const processPath = line.trim()
       PROHIBITED_MAC_APPS.forEach((appName) => {
         if (processPath.toLowerCase().includes(appName.toLowerCase())) {
-          console.log(`[Spektic macOS] Assassinating prohibited app: ${processPath}`)
+          console.log(`[Spektic macOS] Terminating prohibited app: ${processPath}`)
           exec(`pkill -f -9 "${appName}"`, () => {})
         }
       })
@@ -267,6 +286,7 @@ function injectSecurityUI(webContents) {
         -webkit-touch-callout: none !important;
         -webkit-user-select: none !important;
         user-select: none !important;
+        cursor: default !important;
       }
       input, textarea {
         -webkit-user-select: auto !important;
@@ -322,6 +342,9 @@ function createWindow() {
   calculateAppHash()
   cleanupSystemProxies()
   setupNetworkSecurity()
+
+  // Kill all existing browsers, meet hosts, and capture agents immediately on launch
+  killProhibitedProcesses()
 
   try {
     powerBlockerId = powerSaveBlocker.start('prevent-display-sleep')
@@ -453,7 +476,7 @@ function createWindow() {
   // Cover secondary displays
   createMultiMonitorBlackouts()
 
-  // Process Watchdog (1.5s interval with concurrency lock)
+  // Process Watchdog (Runs every 1.5s to assassinate any new unauthorized background apps)
   processWatchdogTimer = setInterval(killProhibitedProcesses, 1500)
 
   // Clipboard Eraser
