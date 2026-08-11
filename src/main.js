@@ -2,7 +2,7 @@ const { app, BrowserWindow, globalShortcut, session, powerSaveBlocker, clipboard
 const path = require('path')
 const crypto = require('crypto')
 const fs = require('fs')
-const { exec, execSync } = require('child_process')
+const { exec } = require('child_process')
 
 // Disable Remote Debugging Port and UI Automation Scraping
 app.commandLine.appendSwitch('remote-debugging-port', '0')
@@ -30,99 +30,9 @@ function calculateAppHash() {
   }
 }
 
-// 2. ELEVATED macOS KERNEL FIREWALL LOCKDOWN (Exact equivalent of Windows netsh advfirewall)
-// Prompts the candidate for Admin authorization (Touch ID / Password) on startup, exactly like Windows UAC requireAdministrator.
-function applyElevatedFirewallLockdown() {
-  if (process.platform !== 'darwin') return
-  try {
-    console.log('[Spektic macOS] Requesting Admin Authorization for Kernel Firewall...')
-
-    // A. Create the macOS Packet Filter (pf) rule file in /tmp
-    const pfRules = `
-# Spektic macOS Kernel Firewall Policy
-# Block all inbound and outbound network traffic by default for the entire operating system
-block in all
-block out all
-pass out proto tcp from any to any port {80, 443}
-`
-    fs.writeFileSync('/tmp/spektic_pf.conf', pfRules)
-
-    // B. Execute with macOS Administrator Privileges (Native Mac UAC Prompt)
-    const adminScript = `
-      do shell script "
-        # 1. Enable macOS Packet Filter Kernel Firewall with Spektic rules
-        pfctl -E -f /tmp/spektic_pf.conf || true
-        
-        # 2. Blackhole DNS for all system network interfaces
-        for service in $(networksetup -listallnetworkservices | grep -v '\\*'); do
-          networksetup -setdnsservers \\"$service\\" 127.0.0.1 || true
-          networksetup -setwebproxy \\"$service\\" 127.0.0.1 9999 || true
-          networksetup -setsecurewebproxy \\"$service\\" 127.0.0.1 9999 || true
-        done
-
-        # 3. Mute all background input/output audio sessions
-        osascript -e 'set volume output muted false'
-      " with administrator privileges
-    `
-
-    exec(`osascript -e '${adminScript.replace(/'/g, "'\\''")}'`, (err) => {
-      if (err) {
-        console.warn('[Spektic macOS] Admin prompt dismissed or bypassed:', err.message)
-      } else {
-        console.log('[Spektic macOS] Kernel Firewall successfully activated!')
-      }
-    })
-
-    // Spektic internal network stack connects directly, bypassing the system blackhole proxy
-    session.defaultSession.setProxy({
-      proxyRules: 'direct://'
-    })
-  } catch (e) {
-    console.error('[Spektic macOS] Firewall application error:', e)
-  }
-}
-
-// Restore macOS Kernel Firewall and normal Wi-Fi on exit
-function restoreElevatedFirewall() {
-  if (process.platform !== 'darwin') return
-  try {
-    console.log('[Spektic macOS] Restoring normal macOS firewall and network settings...')
-    const restoreScript = `
-      do shell script "
-        # 1. Disable pfctl Packet Filter
-        pfctl -d || true
-        
-        # 2. Restore all DNS and Web Proxies across all network interfaces
-        for service in $(networksetup -listallnetworkservices | grep -v '\\*'); do
-          networksetup -setdnsservers \\"$service\\" Empty || true
-          networksetup -setwebproxystate \\"$service\\" off || true
-          networksetup -setsecurewebproxystate \\"$service\\" off || true
-        done
-      " with administrator privileges
-    `
-    execSync(`osascript -e '${restoreScript.replace(/'/g, "'\\''")}'`)
-  } catch (e) {
-    // Non-blocking fallback
-    try {
-      exec(`
-        for service in $(networksetup -listallnetworkservices | grep -v '\\*'); do
-          networksetup -setdnsservers "$service" Empty || true
-          networksetup -setwebproxystate "$service" off || true
-          networksetup -setsecurewebproxystate "$service" off || true
-        done
-      `)
-    } catch (err) {}
-  }
-}
-
-// 3. AGGRESSIVE macOS PROCESS ASSASSIN (Kills Chrome, Meet, Discord, OBS, Safari, etc.)
-// Instantly assassinates Google Chrome (destroying Google Meet / Screen Share / Mic streams),
-// along with every other browser, screen recorder, and communication tool!
+// 2. Comprehensive macOS Process Assassin
+// Kills any other browser or cheating tool so candidates cannot use any other application.
 const PROHIBITED_MAC_APPS = [
-  // Browsers (Killing Google Chrome terminates Google Meet calls, webcam feeds, and cursor tracking immediately!)
-  'Google Chrome',
-  'Google Chrome Canary',
-  'Chromium',
   'Safari',
   'Firefox',
   'Microsoft Edge',
@@ -130,8 +40,6 @@ const PROHIBITED_MAC_APPS = [
   'Arc',
   'Opera',
   'Vivaldi',
-
-  // Remote Control, Screen Sharing & Meeting Tools (Kills Mic & Video streams)
   'TeamViewer',
   'AnyDesk',
   'obs',
@@ -143,10 +51,6 @@ const PROHIBITED_MAC_APPS = [
   'WhatsApp',
   'ScreenCapture',
   'Camtasia',
-  'QuickTime Player',
-  'FaceTime',
-
-  // Productivity & Utility Apps
   'Notes',
   'TextEdit',
   'Calculator',
@@ -171,7 +75,7 @@ function killProhibitedProcesses() {
       const processPath = line.trim()
       PROHIBITED_MAC_APPS.forEach((appName) => {
         if (processPath.toLowerCase().includes(appName.toLowerCase())) {
-          console.log(`[Spektic macOS] Assassinating prohibited app & stream: ${processPath}`)
+          console.log(`[Spektic macOS] Assassinating prohibited app: ${processPath}`)
           exec(`pkill -f -9 "${appName}"`, () => {})
         }
       })
@@ -179,7 +83,7 @@ function killProhibitedProcesses() {
   })
 }
 
-// 4. Multi-Monitor Secondary Screen Blackout Array
+// 3. Multi-Monitor Secondary Screen Blackout Array
 function createMultiMonitorBlackouts() {
   const displays = screen.getAllDisplays()
   const primaryDisplay = screen.getPrimaryDisplay()
@@ -210,15 +114,9 @@ function createMultiMonitorBlackouts() {
   })
 }
 
-// 5. Create Locked Down Primary Electron Window
+// 4. Create Locked Down Primary Electron Window
 function createWindow() {
   calculateAppHash()
-  
-  // Prompt for Admin Elevation & Apply Kernel Firewall Lockdown
-  applyElevatedFirewallLockdown()
-
-  // Kill all competing apps (including Chrome/Google Meet) immediately on launch
-  killProhibitedProcesses()
 
   // Prevent display sleep during the exam
   powerBlockerId = powerSaveBlocker.start('prevent-display-sleep')
@@ -227,17 +125,16 @@ function createWindow() {
     width: 1280,
     height: 800,
     fullscreen: true,
-    kiosk: true, // macOS Kiosk Mode: locks Dock and Menu Bar
+    kiosk: true, // macOS Kiosk Mode: Locks Dock, Top Menu Bar & Mission Control
     alwaysOnTop: true, // Keeps window on top
     frame: false,
     autoHideMenuBar: true,
     titleBarStyle: 'hidden',
-    trafficLightPosition: { x: -100, y: -100 }, // Hides red/yellow/green Mac buttons off screen
+    trafficLightPosition: { x: -100, y: -100 },
     resizable: false,
     movable: false,
     minimizable: false,
     maximizable: false,
-    closable: false,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -250,7 +147,7 @@ function createWindow() {
   // CRITICAL MAC PROTECTION: Turn Zoom/Google Meet/OBS screen recording into a BLACK BOX!
   mainWindow.setContentProtection(true)
 
-  // Disable Right-Click Context Menu
+  // Disable Right-Click Context Menu & Lookups
   mainWindow.webContents.on('context-menu', (e) => {
     e.preventDefault()
   })
@@ -261,15 +158,39 @@ function createWindow() {
     return { action: 'deny' }
   })
 
+  // Strict Network Whitelist (Inside Spektic, only exam-related domains can load)
+  session.defaultSession.webRequest.onBeforeRequest(
+    { urls: ['*://*/*'] },
+    (details, callback) => {
+      const url = details.url.toLowerCase()
+      const allowed =
+        url.includes('spektic.com') ||
+        url.includes('vercel.app') ||
+        url.includes('workers.dev') ||
+        url.includes('livekit.cloud') ||
+        url.includes('supabase.co') ||
+        url.includes('googleapis.com') ||
+        url.includes('gstatic.com') ||
+        url.includes('localhost') ||
+        url.startsWith('data:') ||
+        url.startsWith('blob:')
+
+      if (!allowed) {
+        console.log(`[Spektic macOS] Blocked Unauthorized Network Request: ${details.url}`)
+        return callback({ cancel: true })
+      }
+      callback({ cancel: false })
+    }
+  )
+
   // Intercept Navigation & Clean Instant Exit
   mainWindow.webContents.on('will-navigate', (event, url) => {
     const lowerUrl = url.toLowerCase()
     
-    // Clean Exit Handler
+    // Clean Instant Exit Handler
     if (lowerUrl.includes('spektic-quit-action') || lowerUrl.includes('quit-exam')) {
       event.preventDefault()
-      console.log('[Spektic macOS] Force Quitting Spektic and restoring network...')
-      restoreElevatedFirewall()
+      console.log('[Spektic macOS] Force Quitting Spektic immediately...')
       if (processWatchdogTimer) clearInterval(processWatchdogTimer)
       if (clipboardTimer) clearInterval(clipboardTimer)
       if (powerBlockerId !== null) powerSaveBlocker.stop(powerBlockerId)
@@ -295,7 +216,7 @@ function createWindow() {
     event.preventDefault()
   })
 
-  // 6. Inject Dynamic SHA-256 Hash into Cloudflare Worker Headers
+  // 5. Inject Dynamic SHA-256 Hash into Cloudflare Worker Headers
   session.defaultSession.webRequest.onBeforeSendHeaders(
     { urls: ['https://*/*', 'http://*/*'] },
     (details, callback) => {
@@ -312,7 +233,7 @@ function createWindow() {
     }
   )
 
-  // Automatically grant camera/microphone permissions for AI proctoring & WebRTC inside Spektic
+  // Automatically grant camera/microphone permissions for AI proctoring & WebRTC
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
     if (permission === 'media') {
       return callback(true)
@@ -324,19 +245,17 @@ function createWindow() {
   const TARGET_URL = 'https://spektic.com/join'
   mainWindow.loadURL(TARGET_URL)
 
-  // 7. INJECT SECURITY CSS & 1-CLICK INSTANT EXIT BUTTON
+  // 6. INJECT SECURITY CSS & 1-CLICK INSTANT EXIT BUTTON
   mainWindow.webContents.on('did-finish-load', () => {
     mainWindow.webContents.insertCSS(`
       * {
         -webkit-touch-callout: none !important;
         -webkit-user-select: none !important;
         user-select: none !important;
-        cursor: none !important; /* Hide OS Cursor System-Wide on Exam */
       }
       input, textarea {
         -webkit-user-select: auto !important;
         user-select: auto !important;
-        cursor: auto !important;
       }
       /* Custom Instant Exit Button */
       #spektic-exit-btn {
@@ -352,7 +271,7 @@ function createWindow() {
         font-size: 14px;
         font-weight: 800;
         border-radius: 8px;
-        cursor: pointer !important;
+        cursor: pointer;
         box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
       }
       #spektic-exit-btn:hover {
@@ -373,12 +292,11 @@ function createWindow() {
     `)
   })
 
-  // 8. macOS Keyboard Trap
+  // 7. macOS Keyboard Trap
   mainWindow.webContents.on('before-input-event', (event, input) => {
     // Secret Emergency Exit Hotkey: Command + Shift + Option + Q
     if (input.meta && input.shift && input.alt && input.key.toLowerCase() === 'q') {
       console.log('[Spektic macOS] Developer Emergency Quit Triggered')
-      restoreElevatedFirewall()
       app.exit(0)
       return
     }
@@ -405,7 +323,7 @@ function createWindow() {
   // Cover secondary displays with blackout shields
   createMultiMonitorBlackouts()
 
-  // Start 2-Second Process Watchdog (Kills all prohibited apps continuously)
+  // Start 2-Second Process Watchdog
   processWatchdogTimer = setInterval(killProhibitedProcesses, 2000)
 
   // Start 2-Second Aggressive Clipboard Eraser
@@ -416,7 +334,7 @@ function createWindow() {
   }, 2000)
 }
 
-// 9. System Initialization & Global Shortcut Lockdown
+// 8. System Initialization & Global Shortcut Lockdown
 app.whenReady().then(() => {
   const shortcutsToBlock = [
     'Command+Tab',
@@ -441,7 +359,6 @@ app.whenReady().then(() => {
   try {
     globalShortcut.register('Command+Shift+Option+Q', () => {
       console.log('[Spektic macOS] Global Emergency Quit Triggered')
-      restoreElevatedFirewall()
       app.exit(0)
     })
   } catch (e) {}
@@ -450,7 +367,6 @@ app.whenReady().then(() => {
 })
 
 app.on('will-quit', () => {
-  restoreElevatedFirewall()
   if (processWatchdogTimer) clearInterval(processWatchdogTimer)
   if (clipboardTimer) clearInterval(clipboardTimer)
   if (powerBlockerId !== null) powerSaveBlocker.stop(powerBlockerId)
@@ -458,7 +374,6 @@ app.on('will-quit', () => {
 })
 
 app.on('window-all-closed', () => {
-  restoreElevatedFirewall()
   if (process.platform !== 'darwin') {
     app.exit(0)
   }
