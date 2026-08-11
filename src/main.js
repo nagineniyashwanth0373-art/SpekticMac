@@ -1,17 +1,20 @@
-const { app, BrowserWindow, globalShortcut, session, powerSaveBlocker, clipboard, screen } = require('electron')
+const { app, BrowserWindow, globalShortcut, session, powerSaveBlocker, clipboard, screen, ipcMain } = require('electron')
+const path = require('path')
 const crypto = require('crypto')
 const fs = require('fs')
 const { exec } = require('child_process')
 
-// Prevent multiple instances of the app from ever opening
-const gotTheLock = app.requestSingleInstanceLock()
-if (!gotTheLock) {
-  app.exit(0)
-}
-
 // Disable Remote Debugging Port and UI Automation Scraping
 app.commandLine.appendSwitch('remote-debugging-port', '0')
 app.commandLine.appendSwitch('disable-renderer-accessibility', '1')
+
+// Global crash prevention handlers
+process.on('uncaughtException', (err) => {
+  console.error('[Spektic macOS] Uncaught Exception:', err)
+})
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[Spektic macOS] Unhandled Rejection:', reason)
+})
 
 let mainWindow = null
 let appHash = ''
@@ -35,8 +38,93 @@ function calculateAppHash() {
   }
 }
 
-// 2. Comprehensive macOS Process Assassin (kills unauthorized background apps)
+// 2. Safe Network Cleanup (Ensures no dead proxies are ever left behind on the Mac)
+function cleanupSystemProxies() {
+  if (process.platform !== 'darwin') return
+  try {
+    exec('networksetup -listallnetworkservices', (err, stdout) => {
+      if (err || !stdout) return
+      const services = stdout
+        .split('\n')
+        .map(s => s.trim())
+        .filter(s => s.length > 0 && !s.includes('*') && !s.includes('An asterisk'))
+
+      services.forEach((service) => {
+        exec(`networksetup -setwebproxystate "${service}" off`, () => {})
+        exec(`networksetup -setsecurewebproxystate "${service}" off`, () => {})
+      })
+    })
+  } catch (e) {}
+}
+
+// 3. Strict Domain Whitelist for Spektic (Only allowed exam endpoints receive network traffic)
+const ALLOWED_DOMAINS = [
+  'spektic.com',
+  'vercel.app',
+  'workers.dev',
+  'livekit.cloud',
+  'localhost',
+  '127.0.0.1'
+]
+
+function setupNetworkSecurity() {
+  // Allow direct connection for Spektic
+  session.defaultSession.setProxy({
+    proxyRules: 'direct://'
+  })
+
+  // Block any web request outside allowed exam/proctoring domains
+  session.defaultSession.webRequest.onBeforeRequest((details, callback) => {
+    try {
+      const url = new URL(details.url)
+      const hostname = url.hostname.toLowerCase()
+      
+      const isAllowed = ALLOWED_DOMAINS.some(domain => hostname.includes(domain) || hostname === domain)
+      
+      if (isAllowed || url.protocol === 'data:' || url.protocol === 'blob:' || url.protocol === 'file:') {
+        callback({ cancel: false })
+      } else {
+        console.log(`[Spektic macOS] Blocked Unauthorized Outbound Request: ${details.url}`)
+        callback({ cancel: true })
+      }
+    } catch (e) {
+      callback({ cancel: false })
+    }
+  })
+
+  // Inject SHA-256 key into request headers for Spektic/Cloudflare endpoints
+  session.defaultSession.webRequest.onBeforeSendHeaders(
+    { urls: ['https://*/*', 'http://*/*'] },
+    (details, callback) => {
+      try {
+        const url = details.url.toLowerCase()
+        if (
+          url.includes('spektic.com') ||
+          url.includes('vercel.app') ||
+          url.includes('workers.dev') ||
+          url.includes('localhost')
+        ) {
+          details.requestHeaders['x-secure-exam-key'] = appHash
+        }
+      } catch (e) {}
+      callback({ requestHeaders: details.requestHeaders })
+    }
+  )
+
+  // Auto-grant camera & microphone for WebRTC AI proctoring
+  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
+    if (permission === 'media') {
+      return callback(true)
+    }
+    callback(false)
+  })
+}
+
+// 4. Aggressive Process Assassin (Kills all other browsers and cheating tools)
 const PROHIBITED_MAC_APPS = [
+  'Google Chrome',
+  'Google Chrome Canary',
+  'Chromium',
   'Safari',
   'Firefox',
   'Microsoft Edge',
@@ -87,7 +175,7 @@ function killProhibitedProcesses() {
   })
 }
 
-// 3. Multi-Monitor Secondary Screen Blackout Array
+// 5. Multi-Monitor Secondary Screen Blackout Array
 function createMultiMonitorBlackouts() {
   try {
     const displays = screen.getAllDisplays()
@@ -117,28 +205,40 @@ function createMultiMonitorBlackouts() {
         blackoutWindows.push(blackout)
       }
     })
-  } catch (e) {
-    console.error('[Spektic macOS] Multi-monitor blackout error:', e)
-  }
+  } catch (e) {}
 }
 
-// Clean exit helper
-function cleanExit() {
-  console.log('[Spektic macOS] Clean exit requested')
+// 6. Safe & Fast Shutdown Handler
+function safeQuit() {
+  console.log('[Spektic macOS] Safe Quit Triggered. Cleaning up...')
+  
   if (processWatchdogTimer) clearInterval(processWatchdogTimer)
   if (clipboardTimer) clearInterval(clipboardTimer)
   if (powerBlockerId !== null) {
     try { powerSaveBlocker.stop(powerBlockerId) } catch (e) {}
   }
+  
+  cleanupSystemProxies()
+  
   try { globalShortcut.unregisterAll() } catch (e) {}
+  
+  blackoutWindows.forEach((win) => {
+    try { win.destroy() } catch (e) {}
+  })
+  
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try { mainWindow.destroy() } catch (e) {}
+  }
+  
   app.exit(0)
 }
 
-// 4. Create Locked Down Primary Electron Window
+// 7. Create Main Lockdown Window
 function createWindow() {
   calculateAppHash()
+  cleanupSystemProxies()
+  setupNetworkSecurity()
 
-  // Prevent display sleep during the exam
   try {
     powerBlockerId = powerSaveBlocker.start('prevent-display-sleep')
   } catch (e) {}
@@ -166,52 +266,27 @@ function createWindow() {
     }
   })
 
-  // CRITICAL MAC PROTECTION: Turn Zoom/Google Meet/OBS screen recording into a BLACK BOX!
+  // Turn Zoom/Meet/OBS screen recordings into a BLACK BOX
   mainWindow.setContentProtection(true)
 
-  // Disable Right-Click Context Menu & Lookups
+  // Disable Right-Click Context Menu
   mainWindow.webContents.on('context-menu', (e) => {
     e.preventDefault()
   })
 
   // Block Popups and New Windows
   mainWindow.webContents.setWindowOpenHandler(() => {
-    console.log('[Spektic macOS] Blocked Popup / New Window Request')
     return { action: 'deny' }
   })
 
-  // In-App Network Whitelisting
-  session.defaultSession.webRequest.onBeforeRequest(
-    { urls: ['*://*/*'] },
-    (details, callback) => {
-      const url = details.url.toLowerCase()
-      const allowed =
-        url.includes('spektic.com') ||
-        url.includes('vercel.app') ||
-        url.includes('workers.dev') ||
-        url.includes('livekit.cloud') ||
-        url.includes('supabase.co') ||
-        url.includes('googleapis.com') ||
-        url.includes('gstatic.com') ||
-        url.includes('localhost') ||
-        url.startsWith('data:') ||
-        url.startsWith('blob:')
-
-      if (!allowed) {
-        console.log(`[Spektic macOS] Blocked Unauthorized Network Request: ${details.url}`)
-        return callback({ cancel: true })
-      }
-      callback({ cancel: false })
-    }
-  )
-
-  // Intercept Navigation & Clean Instant Exit
+  // Navigation Guard & Exit Action Intercept
   mainWindow.webContents.on('will-navigate', (event, url) => {
     const lowerUrl = url.toLowerCase()
     
+    // Check if Exit Exam button was clicked
     if (lowerUrl.includes('spektic-quit-action') || lowerUrl.includes('quit-exam')) {
       event.preventDefault()
-      cleanExit()
+      safeQuit()
       return
     }
 
@@ -221,47 +296,21 @@ function createWindow() {
       !lowerUrl.includes('workers.dev') &&
       !lowerUrl.includes('localhost')
     ) {
-      console.log(`[Spektic macOS] Blocked Navigation to: ${url}`)
+      console.log(`[Spektic macOS] Blocked External Navigation to: ${url}`)
       event.preventDefault()
     }
   })
 
   // Block File Downloads on macOS
   session.defaultSession.on('will-download', (event) => {
-    console.log('[Spektic macOS] Blocked File Download Request')
     event.preventDefault()
   })
 
-  // 5. Inject Dynamic SHA-256 Hash into Cloudflare Worker Headers
-  session.defaultSession.webRequest.onBeforeSendHeaders(
-    { urls: ['https://*/*', 'http://*/*'] },
-    (details, callback) => {
-      const url = details.url.toLowerCase()
-      if (
-        url.includes('spektic.com') ||
-        url.includes('vercel.app') ||
-        url.includes('workers.dev') ||
-        url.includes('localhost')
-      ) {
-        details.requestHeaders['x-secure-exam-key'] = appHash
-      }
-      callback({ requestHeaders: details.requestHeaders })
-    }
-  )
-
-  // Automatically grant camera/microphone permissions for AI proctoring & WebRTC
-  session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
-    if (permission === 'media') {
-      return callback(true)
-    }
-    callback(false)
-  })
-
-  // Load Secure Exam URL
+  // Load Exam Portal
   const TARGET_URL = 'https://spektic.com/join'
   mainWindow.loadURL(TARGET_URL)
 
-  // 6. INJECT SECURITY CSS & 1-CLICK INSTANT EXIT BUTTON
+  // Inject CSS for Anti-Siri Lookup & Clean Exit Button
   mainWindow.webContents.on('did-finish-load', () => {
     mainWindow.webContents.insertCSS(`
       * {
@@ -273,24 +322,27 @@ function createWindow() {
         -webkit-user-select: auto !important;
         user-select: auto !important;
       }
+      /* Prominent Fixed Exit Button */
       #spektic-exit-btn {
-        position: fixed;
-        top: 14px;
-        right: 14px;
-        z-index: 2147483647;
-        background: #dc2626;
-        color: #ffffff;
-        border: 2px solid #ffffff;
-        padding: 10px 20px;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-        font-size: 14px;
-        font-weight: 800;
-        border-radius: 8px;
-        cursor: pointer;
-        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+        position: fixed !important;
+        top: 16px !important;
+        right: 16px !important;
+        z-index: 2147483647 !important;
+        background: #dc2626 !important;
+        color: #ffffff !important;
+        border: 2px solid rgba(255, 255, 255, 0.9) !important;
+        padding: 10px 22px !important;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+        font-size: 14px !important;
+        font-weight: 800 !important;
+        border-radius: 8px !important;
+        cursor: pointer !important;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.6) !important;
+        transition: transform 0.15s ease, background 0.15s ease !important;
       }
       #spektic-exit-btn:hover {
-        background: #b91c1c;
+        background: #b91c1c !important;
+        transform: scale(1.05) !important;
       }
     `)
 
@@ -307,11 +359,11 @@ function createWindow() {
     `)
   })
 
-  // 7. macOS Keyboard Trap
+  // Keyboard Trap
   mainWindow.webContents.on('before-input-event', (event, input) => {
-    // Secret Emergency Exit Hotkey: Command + Shift + Option + Q
+    // Emergency Quit Shortcut: Command + Shift + Option + Q
     if (input.meta && input.shift && input.alt && input.key.toLowerCase() === 'q') {
-      cleanExit()
+      safeQuit()
       return
     }
 
@@ -328,27 +380,24 @@ function createWindow() {
         key === 'c' ||
         key === 'v'
       ) {
-        console.log(`[Spektic macOS] Blocked Shortcut: Cmd+${key}`)
         event.preventDefault()
       }
     }
   })
 
-  // Cover secondary displays with blackout shields
+  // Cover secondary displays
   createMultiMonitorBlackouts()
 
-  // Start 2-Second Process Watchdog
-  processWatchdogTimer = setInterval(killProhibitedProcesses, 2000)
+  // Process Watchdog
+  processWatchdogTimer = setInterval(killProhibitedProcesses, 1500)
 
-  // Start 2-Second Aggressive Clipboard Eraser
+  // Clipboard Eraser
   clipboardTimer = setInterval(() => {
-    try {
-      clipboard.clear()
-    } catch (e) {}
+    try { clipboard.clear() } catch (e) {}
   }, 2000)
 }
 
-// 8. System Initialization & Global Shortcut Lockdown
+// 8. App Lifecycle & Global Shortcut Registration
 app.whenReady().then(() => {
   const shortcutsToBlock = [
     'Command+Tab',
@@ -363,16 +412,14 @@ app.whenReady().then(() => {
 
   shortcutsToBlock.forEach((sc) => {
     try {
-      globalShortcut.register(sc, () => {
-        console.log(`[Spektic macOS] Blocked Global System Hotkey: ${sc}`)
-      })
+      globalShortcut.register(sc, () => {})
     } catch (e) {}
   })
 
-  // Secret Emergency Exit Hotkey: Command + Shift + Option + Q
+  // Emergency Global Shortcut
   try {
     globalShortcut.register('Command+Shift+Option+Q', () => {
-      cleanExit()
+      safeQuit()
     })
   } catch (e) {}
 
@@ -380,9 +427,9 @@ app.whenReady().then(() => {
 })
 
 app.on('will-quit', () => {
-  cleanExit()
+  safeQuit()
 })
 
 app.on('window-all-closed', () => {
-  cleanExit()
+  safeQuit()
 })
