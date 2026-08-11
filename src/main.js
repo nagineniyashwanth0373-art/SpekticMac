@@ -4,7 +4,7 @@ const crypto = require('crypto')
 const fs = require('fs')
 const { exec } = require('child_process')
 
-// 1. Single-Instance Lock (CRITICAL: Prevents loops that open 100s of app instances)
+// 1. Single-Instance Lock (Prevents duplicate instances and infinite loops)
 const gotTheLock = app.requestSingleInstanceLock()
 if (!gotTheLock) {
   console.log('[Spektic macOS] Another instance is already running. Exiting immediately.')
@@ -16,10 +16,10 @@ app.commandLine.appendSwitch('remote-debugging-port', '0')
 app.commandLine.appendSwitch('disable-renderer-accessibility', '1')
 
 process.on('uncaughtException', (err) => {
-  console.error('[Spektic macOS] Caught Unhandled Exception:', err)
+  console.error('[Spektic macOS] Uncaught Exception Guard:', err)
 })
 process.on('unhandledRejection', (reason) => {
-  console.error('[Spektic macOS] Caught Unhandled Rejection:', reason)
+  console.error('[Spektic macOS] Unhandled Rejection Guard:', reason)
 })
 
 let mainWindow = null
@@ -65,7 +65,7 @@ function cleanupSystemProxies() {
   } catch (e) {}
 }
 
-// 5. Strict Domain Whitelist for Spektic (Blocks all unauthorized external websites)
+// 5. Strict Domain Whitelist for Spektic (Only allowed exam endpoints receive network traffic)
 const ALLOWED_DOMAINS = [
   'spektic.com',
   'vercel.app',
@@ -76,12 +76,10 @@ const ALLOWED_DOMAINS = [
 ]
 
 function setupNetworkSecurity() {
-  // Allow direct connection for Spektic
   session.defaultSession.setProxy({
     proxyRules: 'direct://'
   })
 
-  // Block any web request outside allowed exam/proctoring domains
   session.defaultSession.webRequest.onBeforeRequest((details, callback) => {
     try {
       const url = new URL(details.url)
@@ -100,7 +98,6 @@ function setupNetworkSecurity() {
     }
   })
 
-  // Inject SHA-256 key into request headers for Spektic/Cloudflare endpoints
   session.defaultSession.webRequest.onBeforeSendHeaders(
     { urls: ['https://*/*', 'http://*/*'] },
     (details, callback) => {
@@ -119,7 +116,6 @@ function setupNetworkSecurity() {
     }
   )
 
-  // Auto-grant camera & microphone for WebRTC AI proctoring
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
     if (permission === 'media') {
       return callback(true)
@@ -128,7 +124,7 @@ function setupNetworkSecurity() {
   })
 }
 
-// 6. Concurrency-Safe Process Assassin (Kills browsers & cheating tools without process pileups)
+// 6. Concurrency-Safe Process Assassin (Kills prohibited apps cleanly)
 const PROHIBITED_MAC_APPS = [
   'Google Chrome',
   'Google Chrome Canary',
@@ -185,10 +181,9 @@ function killProhibitedProcesses() {
   })
 }
 
-// 7. Multi-Monitor Secondary Screen Blackout Array (Safe & Non-Duplicating)
+// 7. Multi-Monitor Secondary Screen Blackout Array
 function createMultiMonitorBlackouts() {
   try {
-    // Destroy any existing blackout windows first
     blackoutWindows.forEach((win) => {
       try { win.destroy() } catch (e) {}
     })
@@ -249,7 +244,7 @@ function safeQuit() {
     try { mainWindow.destroy() } catch (e) {}
   }
 
-  // Hard exit immediately (bypasses any window event loops)
+  // Hard immediate exit
   app.exit(0)
 }
 
@@ -257,6 +252,63 @@ function safeQuit() {
 ipcMain.on('spektic-force-quit', () => {
   safeQuit()
 })
+
+// Helper to inject Exit Button & Security CSS
+function injectExitUI() {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+
+  mainWindow.webContents.insertCSS(`
+    * {
+      -webkit-touch-callout: none !important;
+      -webkit-user-select: none !important;
+      user-select: none !important;
+    }
+    input, textarea {
+      -webkit-user-select: auto !important;
+      user-select: auto !important;
+    }
+    #spektic-exit-btn {
+      position: fixed !important;
+      top: 16px !important;
+      right: 16px !important;
+      z-index: 2147483647 !important;
+      background: #dc2626 !important;
+      color: #ffffff !important;
+      border: 2px solid rgba(255, 255, 255, 0.9) !important;
+      padding: 10px 22px !important;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+      font-size: 14px !important;
+      font-weight: 800 !important;
+      border-radius: 8px !important;
+      cursor: pointer !important;
+      pointer-events: auto !important;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, 0.6) !important;
+      transition: transform 0.15s ease, background 0.15s ease !important;
+    }
+    #spektic-exit-btn:hover {
+      background: #b91c1c !important;
+      transform: scale(1.05) !important;
+    }
+  `)
+
+  mainWindow.webContents.executeJavaScript(`
+    (function() {
+      if (!document.getElementById('spektic-exit-btn')) {
+        const exitBtn = document.createElement('button');
+        exitBtn.id = 'spektic-exit-btn';
+        exitBtn.innerText = '✕ Exit Spektic';
+        exitBtn.onclick = function() {
+          if (window.spekticAPI && window.spekticAPI.exitApp) {
+            window.spekticAPI.exitApp();
+          } else {
+            window.location.href = 'https://spektic.com/spektic-quit-action';
+          }
+        };
+        document.body.appendChild(exitBtn);
+      }
+    })();
+  `)
+}
 
 // 9. Create Main Lockdown Window
 function createWindow() {
@@ -343,58 +395,9 @@ function createWindow() {
   const TARGET_URL = 'https://spektic.com/join'
   mainWindow.loadURL(TARGET_URL)
 
-  // Inject CSS for Anti-Siri Lookup & Clean Exit Button
-  mainWindow.webContents.on('did-finish-load', () => {
-    mainWindow.webContents.insertCSS(`
-      * {
-        -webkit-touch-callout: none !important;
-        -webkit-user-select: none !important;
-        user-select: none !important;
-      }
-      input, textarea {
-        -webkit-user-select: auto !important;
-        user-select: auto !important;
-      }
-      /* Prominent Fixed Exit Button */
-      #spektic-exit-btn {
-        position: fixed !important;
-        top: 16px !important;
-        right: 16px !important;
-        z-index: 2147483647 !important;
-        background: #dc2626 !important;
-        color: #ffffff !important;
-        border: 2px solid rgba(255, 255, 255, 0.9) !important;
-        padding: 10px 22px !important;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
-        font-size: 14px !important;
-        font-weight: 800 !important;
-        border-radius: 8px !important;
-        cursor: pointer !important;
-        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.6) !important;
-        transition: transform 0.15s ease, background 0.15s ease !important;
-      }
-      #spektic-exit-btn:hover {
-        background: #b91c1c !important;
-        transform: scale(1.05) !important;
-      }
-    `)
-
-    mainWindow.webContents.executeJavaScript(`
-      if (!document.getElementById('spektic-exit-btn')) {
-        const exitBtn = document.createElement('button');
-        exitBtn.id = 'spektic-exit-btn';
-        exitBtn.innerText = '✕ Exit Spektic';
-        exitBtn.onclick = () => {
-          if (window.spekticAPI && window.spekticAPI.exitApp) {
-            window.spekticAPI.exitApp();
-          } else {
-            window.location.href = 'https://spektic.com/spektic-quit-action';
-          }
-        };
-        document.body.appendChild(exitBtn);
-      }
-    `)
-  })
+  // Inject Exit Button & Anti-Lookup CSS on both dom-ready and did-finish-load
+  mainWindow.webContents.on('dom-ready', injectExitUI)
+  mainWindow.webContents.on('did-finish-load', injectExitUI)
 
   // Keyboard Trap
   mainWindow.webContents.on('before-input-event', (event, input) => {
