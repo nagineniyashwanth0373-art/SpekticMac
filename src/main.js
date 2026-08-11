@@ -1,14 +1,19 @@
-const { app, BrowserWindow, globalShortcut, session, powerSaveBlocker, clipboard, screen, ipcMain } = require('electron')
-const path = require('path')
+const { app, BrowserWindow, globalShortcut, session, powerSaveBlocker, clipboard, screen } = require('electron')
 const crypto = require('crypto')
 const fs = require('fs')
-const { exec, execSync, spawn } = require('child_process')
+const { exec } = require('child_process')
+
+// Prevent multiple instances of the app from ever opening
+const gotTheLock = app.requestSingleInstanceLock()
+if (!gotTheLock) {
+  app.exit(0)
+}
 
 // Disable Remote Debugging Port and UI Automation Scraping
 app.commandLine.appendSwitch('remote-debugging-port', '0')
 app.commandLine.appendSwitch('disable-renderer-accessibility', '1')
 
-let mainWindow
+let mainWindow = null
 let appHash = ''
 let processWatchdogTimer = null
 let clipboardTimer = null
@@ -30,87 +35,7 @@ function calculateAppHash() {
   }
 }
 
-// 2. SELF-HEALING SYSTEM-WIDE macOS NETWORK BLACKHOLE
-// Cuts 100% of all internet access to the Mac for every other app.
-// Spawns a detached background watchdog so if Spektic is force-quit or crashes,
-// the watchdog automatically restores normal Wi-Fi within 1 second!
-function applySystemNetworkLockdown() {
-  if (process.platform !== 'darwin') return
-  try {
-    console.log('[Spektic macOS] Activating System-Wide Internet Blackhole for all other apps...')
-    
-    // Dynamically query all active network interfaces
-    exec('networksetup -listallnetworkservices', (err, stdout) => {
-      if (err || !stdout) return
-      
-      const services = stdout
-        .split('\n')
-        .map(s => s.trim())
-        .filter(s => s.length > 0 && !s.includes('*') && !s.includes('An asterisk'))
-
-      services.forEach((service) => {
-        // Point HTTP and HTTPS proxies to dead blackhole (127.0.0.1:9999)
-        exec(`networksetup -setwebproxy "${service}" 127.0.0.1 9999`, () => {})
-        exec(`networksetup -setsecurewebproxy "${service}" 127.0.0.1 9999`, () => {})
-      })
-    })
-
-    // Force Spektic to bypass the blackhole proxy and connect directly
-    session.defaultSession.setProxy({
-      proxyRules: 'direct://'
-    })
-
-    // Spawn an autonomous, detached watchdog process.
-    // If Spektic crashes, gets force-killed, or is closed, this watchdog automatically restores Wi-Fi!
-    const watcher = spawn(
-      process.execPath,
-      [
-        '-e',
-        `
-        const { execSync } = require('child_process');
-        const ppid = ${process.pid};
-        const interval = setInterval(() => {
-          try {
-            process.kill(ppid, 0); // Check if Spektic is still alive
-          } catch (e) {
-            // Spektic has exited or died! Restore Wi-Fi immediately!
-            clearInterval(interval);
-            try {
-              const services = ['Wi-Fi', 'Ethernet', 'iPhone USB', 'Thunderbolt Bridge'];
-              services.forEach(s => {
-                try { execSync('networksetup -setwebproxystate "' + s + '" off'); } catch(err){}
-                try { execSync('networksetup -setsecurewebproxystate "' + s + '" off'); } catch(err){}
-              });
-            } catch (err) {}
-            process.exit(0);
-          }
-        }, 1000);
-        `
-      ],
-      { detached: true, stdio: 'ignore' }
-    )
-    watcher.unref()
-  } catch (e) {
-    console.error('[Spektic macOS] Network lockdown error:', e)
-  }
-}
-
-// Synchronous Network Restoration (Ensures internet is restored before process exit)
-function restoreSystemNetworkLockdown() {
-  if (process.platform !== 'darwin') return
-  try {
-    console.log('[Spektic macOS] Restoring normal internet for all Mac apps...')
-    const services = ['Wi-Fi', 'Ethernet', 'iPhone USB', 'Thunderbolt Bridge']
-    services.forEach((service) => {
-      try {
-        execSync(`networksetup -setwebproxystate "${service}" off`)
-        execSync(`networksetup -setsecurewebproxystate "${service}" off`)
-      } catch (err) {}
-    })
-  } catch (e) {}
-}
-
-// 3. Comprehensive macOS Process Assassin
+// 2. Comprehensive macOS Process Assassin (kills unauthorized background apps)
 const PROHIBITED_MAC_APPS = [
   'Safari',
   'Firefox',
@@ -162,51 +87,68 @@ function killProhibitedProcesses() {
   })
 }
 
-// 4. Multi-Monitor Secondary Screen Blackout Array
+// 3. Multi-Monitor Secondary Screen Blackout Array
 function createMultiMonitorBlackouts() {
-  const displays = screen.getAllDisplays()
-  const primaryDisplay = screen.getPrimaryDisplay()
+  try {
+    const displays = screen.getAllDisplays()
+    const primaryDisplay = screen.getPrimaryDisplay()
 
-  displays.forEach((display) => {
-    if (display.id !== primaryDisplay.id) {
-      const blackout = new BrowserWindow({
-        x: display.bounds.x,
-        y: display.bounds.y,
-        width: display.bounds.width,
-        height: display.bounds.height,
-        fullscreen: true,
-        kiosk: true,
-        alwaysOnTop: true,
-        frame: false,
-        backgroundColor: '#000000',
-        resizable: false,
-        movable: false,
-        minimizable: false,
-        maximizable: false,
-        closable: false
-      })
+    displays.forEach((display) => {
+      if (display.id !== primaryDisplay.id) {
+        const blackout = new BrowserWindow({
+          x: display.bounds.x,
+          y: display.bounds.y,
+          width: display.bounds.width,
+          height: display.bounds.height,
+          fullscreen: true,
+          kiosk: true,
+          alwaysOnTop: true,
+          frame: false,
+          backgroundColor: '#000000',
+          resizable: false,
+          movable: false,
+          minimizable: false,
+          maximizable: false,
+          closable: false
+        })
 
-      blackout.setContentProtection(true)
-      blackout.loadURL('data:text/html,<html><body style="background-color:black;margin:0;padding:0;"></body></html>')
-      blackoutWindows.push(blackout)
-    }
-  })
+        blackout.setContentProtection(true)
+        blackout.loadURL('data:text/html,<html><body style="background-color:black;margin:0;padding:0;"></body></html>')
+        blackoutWindows.push(blackout)
+      }
+    })
+  } catch (e) {
+    console.error('[Spektic macOS] Multi-monitor blackout error:', e)
+  }
 }
 
-// 5. Create Locked Down Primary Electron Window
+// Clean exit helper
+function cleanExit() {
+  console.log('[Spektic macOS] Clean exit requested')
+  if (processWatchdogTimer) clearInterval(processWatchdogTimer)
+  if (clipboardTimer) clearInterval(clipboardTimer)
+  if (powerBlockerId !== null) {
+    try { powerSaveBlocker.stop(powerBlockerId) } catch (e) {}
+  }
+  try { globalShortcut.unregisterAll() } catch (e) {}
+  app.exit(0)
+}
+
+// 4. Create Locked Down Primary Electron Window
 function createWindow() {
   calculateAppHash()
-  applySystemNetworkLockdown()
 
   // Prevent display sleep during the exam
-  powerBlockerId = powerSaveBlocker.start('prevent-display-sleep')
+  try {
+    powerBlockerId = powerSaveBlocker.start('prevent-display-sleep')
+  } catch (e) {}
 
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
     fullscreen: true,
-    kiosk: true, // macOS Kiosk Mode
-    alwaysOnTop: true, // Keeps window on top
+    kiosk: true,
+    alwaysOnTop: true,
     frame: false,
     autoHideMenuBar: true,
     titleBarStyle: 'hidden',
@@ -227,7 +169,7 @@ function createWindow() {
   // CRITICAL MAC PROTECTION: Turn Zoom/Google Meet/OBS screen recording into a BLACK BOX!
   mainWindow.setContentProtection(true)
 
-  // Disable Right-Click Context Menu
+  // Disable Right-Click Context Menu & Lookups
   mainWindow.webContents.on('context-menu', (e) => {
     e.preventDefault()
   })
@@ -238,20 +180,38 @@ function createWindow() {
     return { action: 'deny' }
   })
 
+  // In-App Network Whitelisting
+  session.defaultSession.webRequest.onBeforeRequest(
+    { urls: ['*://*/*'] },
+    (details, callback) => {
+      const url = details.url.toLowerCase()
+      const allowed =
+        url.includes('spektic.com') ||
+        url.includes('vercel.app') ||
+        url.includes('workers.dev') ||
+        url.includes('livekit.cloud') ||
+        url.includes('supabase.co') ||
+        url.includes('googleapis.com') ||
+        url.includes('gstatic.com') ||
+        url.includes('localhost') ||
+        url.startsWith('data:') ||
+        url.startsWith('blob:')
+
+      if (!allowed) {
+        console.log(`[Spektic macOS] Blocked Unauthorized Network Request: ${details.url}`)
+        return callback({ cancel: true })
+      }
+      callback({ cancel: false })
+    }
+  )
+
   // Intercept Navigation & Clean Instant Exit
   mainWindow.webContents.on('will-navigate', (event, url) => {
     const lowerUrl = url.toLowerCase()
     
-    // Clean Exit Handler
     if (lowerUrl.includes('spektic-quit-action') || lowerUrl.includes('quit-exam')) {
       event.preventDefault()
-      console.log('[Spektic macOS] Force Quitting Spektic and restoring network...')
-      restoreSystemNetworkLockdown()
-      if (processWatchdogTimer) clearInterval(processWatchdogTimer)
-      if (clipboardTimer) clearInterval(clipboardTimer)
-      if (powerBlockerId !== null) powerSaveBlocker.stop(powerBlockerId)
-      globalShortcut.unregisterAll()
-      app.exit(0)
+      cleanExit()
       return
     }
 
@@ -272,7 +232,7 @@ function createWindow() {
     event.preventDefault()
   })
 
-  // 6. Inject Dynamic SHA-256 Hash into Cloudflare Worker Headers
+  // 5. Inject Dynamic SHA-256 Hash into Cloudflare Worker Headers
   session.defaultSession.webRequest.onBeforeSendHeaders(
     { urls: ['https://*/*', 'http://*/*'] },
     (details, callback) => {
@@ -301,21 +261,18 @@ function createWindow() {
   const TARGET_URL = 'https://spektic.com/join'
   mainWindow.loadURL(TARGET_URL)
 
-  // 7. INJECT SECURITY CSS & 1-CLICK INSTANT EXIT BUTTON
+  // 6. INJECT SECURITY CSS & 1-CLICK INSTANT EXIT BUTTON
   mainWindow.webContents.on('did-finish-load', () => {
     mainWindow.webContents.insertCSS(`
       * {
         -webkit-touch-callout: none !important;
         -webkit-user-select: none !important;
         user-select: none !important;
-        cursor: none !important;
       }
       input, textarea {
         -webkit-user-select: auto !important;
         user-select: auto !important;
-        cursor: auto !important;
       }
-      /* Custom Instant Exit Button */
       #spektic-exit-btn {
         position: fixed;
         top: 14px;
@@ -329,7 +286,7 @@ function createWindow() {
         font-size: 14px;
         font-weight: 800;
         border-radius: 8px;
-        cursor: pointer !important;
+        cursor: pointer;
         box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
       }
       #spektic-exit-btn:hover {
@@ -350,13 +307,11 @@ function createWindow() {
     `)
   })
 
-  // 8. macOS Keyboard Trap
+  // 7. macOS Keyboard Trap
   mainWindow.webContents.on('before-input-event', (event, input) => {
     // Secret Emergency Exit Hotkey: Command + Shift + Option + Q
     if (input.meta && input.shift && input.alt && input.key.toLowerCase() === 'q') {
-      console.log('[Spektic macOS] Developer Emergency Quit Triggered')
-      restoreSystemNetworkLockdown()
-      app.exit(0)
+      cleanExit()
       return
     }
 
@@ -382,7 +337,7 @@ function createWindow() {
   // Cover secondary displays with blackout shields
   createMultiMonitorBlackouts()
 
-  // Start 2-Second Process Watchdog (Kills all prohibited apps)
+  // Start 2-Second Process Watchdog
   processWatchdogTimer = setInterval(killProhibitedProcesses, 2000)
 
   // Start 2-Second Aggressive Clipboard Eraser
@@ -393,17 +348,17 @@ function createWindow() {
   }, 2000)
 }
 
-// 9. System Initialization & Global Shortcut Lockdown
+// 8. System Initialization & Global Shortcut Lockdown
 app.whenReady().then(() => {
   const shortcutsToBlock = [
     'Command+Tab',
     'Command+Q',
     'Command+W',
-    'Command+Space', // Spotlight Search
-    'Command+Option+Esc', // Force Quit Menu
-    'Command+Shift+3', // Screenshot
-    'Command+Shift+4', // Screenshot Snipping
-    'Command+Shift+5' // Screen Recording Bar
+    'Command+Space',
+    'Command+Option+Esc',
+    'Command+Shift+3',
+    'Command+Shift+4',
+    'Command+Shift+5'
   ]
 
   shortcutsToBlock.forEach((sc) => {
@@ -417,37 +372,17 @@ app.whenReady().then(() => {
   // Secret Emergency Exit Hotkey: Command + Shift + Option + Q
   try {
     globalShortcut.register('Command+Shift+Option+Q', () => {
-      console.log('[Spektic macOS] Global Emergency Quit Triggered')
-      restoreSystemNetworkLockdown()
-      app.exit(0)
+      cleanExit()
     })
   } catch (e) {}
 
   createWindow()
 })
 
-// Safe cleanup hooks across all possible exit scenarios
-process.on('exit', () => restoreSystemNetworkLockdown())
-process.on('SIGINT', () => {
-  restoreSystemNetworkLockdown()
-  app.exit(0)
-})
-process.on('SIGTERM', () => {
-  restoreSystemNetworkLockdown()
-  app.exit(0)
-})
-
 app.on('will-quit', () => {
-  restoreSystemNetworkLockdown()
-  if (processWatchdogTimer) clearInterval(processWatchdogTimer)
-  if (clipboardTimer) clearInterval(clipboardTimer)
-  if (powerBlockerId !== null) powerSaveBlocker.stop(powerBlockerId)
-  globalShortcut.unregisterAll()
+  cleanExit()
 })
 
 app.on('window-all-closed', () => {
-  restoreSystemNetworkLockdown()
-  if (process.platform !== 'darwin') {
-    app.exit(0)
-  }
+  cleanExit()
 })
