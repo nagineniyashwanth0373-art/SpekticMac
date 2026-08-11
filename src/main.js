@@ -4,16 +4,22 @@ const crypto = require('crypto')
 const fs = require('fs')
 const { exec } = require('child_process')
 
-// Disable Remote Debugging Port and UI Automation Scraping
+// 1. Single-Instance Lock (CRITICAL: Prevents loops that open 100s of app instances)
+const gotTheLock = app.requestSingleInstanceLock()
+if (!gotTheLock) {
+  console.log('[Spektic macOS] Another instance is already running. Exiting immediately.')
+  app.exit(0)
+}
+
+// 2. Global Crash Prevention & Security Switches
 app.commandLine.appendSwitch('remote-debugging-port', '0')
 app.commandLine.appendSwitch('disable-renderer-accessibility', '1')
 
-// Global crash prevention handlers
 process.on('uncaughtException', (err) => {
-  console.error('[Spektic macOS] Uncaught Exception:', err)
+  console.error('[Spektic macOS] Caught Unhandled Exception:', err)
 })
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('[Spektic macOS] Unhandled Rejection:', reason)
+process.on('unhandledRejection', (reason) => {
+  console.error('[Spektic macOS] Caught Unhandled Rejection:', reason)
 })
 
 let mainWindow = null
@@ -22,8 +28,10 @@ let processWatchdogTimer = null
 let clipboardTimer = null
 let powerBlockerId = null
 let blackoutWindows = []
+let isQuitting = false
+let isCheckingProcesses = false
 
-// 1. Calculate SHA-256 Hash of this application script
+// 3. Calculate SHA-256 Hash of this application script
 function calculateAppHash() {
   try {
     const mainPath = __filename
@@ -38,7 +46,7 @@ function calculateAppHash() {
   }
 }
 
-// 2. Safe Network Cleanup (Ensures no dead proxies are ever left behind on the Mac)
+// 4. Safe Network Cleanup (Ensures no dead proxies are ever left behind on the Mac)
 function cleanupSystemProxies() {
   if (process.platform !== 'darwin') return
   try {
@@ -57,7 +65,7 @@ function cleanupSystemProxies() {
   } catch (e) {}
 }
 
-// 3. Strict Domain Whitelist for Spektic (Only allowed exam endpoints receive network traffic)
+// 5. Strict Domain Whitelist for Spektic (Blocks all unauthorized external websites)
 const ALLOWED_DOMAINS = [
   'spektic.com',
   'vercel.app',
@@ -84,7 +92,7 @@ function setupNetworkSecurity() {
       if (isAllowed || url.protocol === 'data:' || url.protocol === 'blob:' || url.protocol === 'file:') {
         callback({ cancel: false })
       } else {
-        console.log(`[Spektic macOS] Blocked Unauthorized Outbound Request: ${details.url}`)
+        console.log(`[Spektic macOS] Blocked Outbound Request: ${details.url}`)
         callback({ cancel: true })
       }
     } catch (e) {
@@ -120,7 +128,7 @@ function setupNetworkSecurity() {
   })
 }
 
-// 4. Aggressive Process Assassin (Kills all other browsers and cheating tools)
+// 6. Concurrency-Safe Process Assassin (Kills browsers & cheating tools without process pileups)
 const PROHIBITED_MAC_APPS = [
   'Google Chrome',
   'Google Chrome Canary',
@@ -157,10 +165,12 @@ const PROHIBITED_MAC_APPS = [
 ]
 
 function killProhibitedProcesses() {
-  if (process.platform !== 'darwin') return
+  if (process.platform !== 'darwin' || isQuitting || isCheckingProcesses) return
+  isCheckingProcesses = true
 
   exec('ps -ax -o comm=', (err, stdout) => {
-    if (err || !stdout) return
+    isCheckingProcesses = false
+    if (err || !stdout || isQuitting) return
 
     const runningLines = stdout.split('\n')
     runningLines.forEach((line) => {
@@ -175,9 +185,15 @@ function killProhibitedProcesses() {
   })
 }
 
-// 5. Multi-Monitor Secondary Screen Blackout Array
+// 7. Multi-Monitor Secondary Screen Blackout Array (Safe & Non-Duplicating)
 function createMultiMonitorBlackouts() {
   try {
+    // Destroy any existing blackout windows first
+    blackoutWindows.forEach((win) => {
+      try { win.destroy() } catch (e) {}
+    })
+    blackoutWindows = []
+
     const displays = screen.getAllDisplays()
     const primaryDisplay = screen.getPrimaryDisplay()
 
@@ -208,32 +224,41 @@ function createMultiMonitorBlackouts() {
   } catch (e) {}
 }
 
-// 6. Safe & Fast Shutdown Handler
+// 8. 100% Guaranteed Instant Safe-Quit Handler
 function safeQuit() {
-  console.log('[Spektic macOS] Safe Quit Triggered. Cleaning up...')
-  
+  if (isQuitting) return
+  isQuitting = true
+  console.log('[Spektic macOS] Force Quit Triggered. Restoring OS and terminating instantly.')
+
   if (processWatchdogTimer) clearInterval(processWatchdogTimer)
   if (clipboardTimer) clearInterval(clipboardTimer)
+  
   if (powerBlockerId !== null) {
     try { powerSaveBlocker.stop(powerBlockerId) } catch (e) {}
   }
-  
+
   cleanupSystemProxies()
-  
+
   try { globalShortcut.unregisterAll() } catch (e) {}
-  
+
   blackoutWindows.forEach((win) => {
     try { win.destroy() } catch (e) {}
   })
-  
+
   if (mainWindow && !mainWindow.isDestroyed()) {
     try { mainWindow.destroy() } catch (e) {}
   }
-  
+
+  // Hard exit immediately (bypasses any window event loops)
   app.exit(0)
 }
 
-// 7. Create Main Lockdown Window
+// IPC quit handler (from preload/renderer)
+ipcMain.on('spektic-force-quit', () => {
+  safeQuit()
+})
+
+// 9. Create Main Lockdown Window
 function createWindow() {
   calculateAppHash()
   cleanupSystemProxies()
@@ -258,6 +283,7 @@ function createWindow() {
     minimizable: false,
     maximizable: false,
     webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
       contextIsolation: true,
       webSecurity: true,
@@ -283,7 +309,6 @@ function createWindow() {
   mainWindow.webContents.on('will-navigate', (event, url) => {
     const lowerUrl = url.toLowerCase()
     
-    // Check if Exit Exam button was clicked
     if (lowerUrl.includes('spektic-quit-action') || lowerUrl.includes('quit-exam')) {
       event.preventDefault()
       safeQuit()
@@ -304,6 +329,14 @@ function createWindow() {
   // Block File Downloads on macOS
   session.defaultSession.on('will-download', (event) => {
     event.preventDefault()
+  })
+
+  // Prevent accidental close unless isQuitting is true
+  mainWindow.on('close', (e) => {
+    if (!isQuitting) {
+      e.preventDefault()
+      safeQuit()
+    }
   })
 
   // Load Exam Portal
@@ -352,7 +385,11 @@ function createWindow() {
         exitBtn.id = 'spektic-exit-btn';
         exitBtn.innerText = '✕ Exit Spektic';
         exitBtn.onclick = () => {
-          window.location.href = 'https://spektic.com/spektic-quit-action';
+          if (window.spekticAPI && window.spekticAPI.exitApp) {
+            window.spekticAPI.exitApp();
+          } else {
+            window.location.href = 'https://spektic.com/spektic-quit-action';
+          }
         };
         document.body.appendChild(exitBtn);
       }
@@ -361,8 +398,9 @@ function createWindow() {
 
   // Keyboard Trap
   mainWindow.webContents.on('before-input-event', (event, input) => {
-    // Emergency Quit Shortcut: Command + Shift + Option + Q
-    if (input.meta && input.shift && input.alt && input.key.toLowerCase() === 'q') {
+    // Emergency Quit Shortcut: Command + Shift + Option + Q or Command + Option + Q
+    if ((input.meta && input.shift && input.alt && input.key.toLowerCase() === 'q') ||
+        (input.meta && input.alt && input.key.toLowerCase() === 'q')) {
       safeQuit()
       return
     }
@@ -385,10 +423,18 @@ function createWindow() {
     }
   })
 
+  // Handle second-instance attempts
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.focus()
+    }
+  })
+
   // Cover secondary displays
   createMultiMonitorBlackouts()
 
-  // Process Watchdog
+  // Process Watchdog (1.5s interval with concurrency lock)
   processWatchdogTimer = setInterval(killProhibitedProcesses, 1500)
 
   // Clipboard Eraser
@@ -397,7 +443,7 @@ function createWindow() {
   }, 2000)
 }
 
-// 8. App Lifecycle & Global Shortcut Registration
+// 10. App Lifecycle & Global Shortcut Registration
 app.whenReady().then(() => {
   const shortcutsToBlock = [
     'Command+Tab',
