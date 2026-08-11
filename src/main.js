@@ -4,7 +4,7 @@ const crypto = require('crypto')
 const fs = require('fs')
 const { exec } = require('child_process')
 
-// 1. Single-Instance Lock
+// 1. Single-Instance Lock (Prevents loops that open 100s of app instances)
 const gotTheLock = app.requestSingleInstanceLock()
 if (!gotTheLock) {
   console.log('[Spektic macOS] Another instance is already running. Exiting immediately.')
@@ -30,6 +30,7 @@ let powerBlockerId = null
 let blackoutWindows = []
 let isQuitting = false
 let isCheckingProcesses = false
+let isPfctlActive = false
 
 // 3. Calculate SHA-256 Hash of this application script
 function calculateAppHash() {
@@ -46,7 +47,40 @@ function calculateAppHash() {
   }
 }
 
-// 4. Safe Network Cleanup
+// 4. macOS KERNEL PACKET FILTER (pfctl) FIREWALL
+// Cuts all unauthorized outbound UDP and TCP streams (Meet, Zoom, Discord, Proxies) at the macOS kernel level
+function enableKernelFirewall() {
+  if (process.platform !== 'darwin') return
+  try {
+    console.log('[Spektic macOS] Requesting Touch ID / Admin authorization for Kernel Firewall...')
+    
+    // PF rules: Drop all outbound UDP (kills Meet/Zoom/Discord audio/video streams) & non-HTTPS ports
+    const pfRules = 'block drop out proto udp to any\\npass out proto udp to any port 53\\nblock drop out proto tcp to any port != {80, 443}\\npass out proto tcp from any to any port {80, 443}'
+    const script = `do shell script "echo \\"${pfRules}\\" > /tmp/spektic_pf.conf && pfctl -E -f /tmp/spektic_pf.conf" with administrator privileges`
+    
+    exec(`osascript -e '${script}'`, (err, stdout, stderr) => {
+      if (err) {
+        console.warn('[Spektic macOS] Kernel firewall prompt dismissed or failed:', err.message)
+      } else {
+        isPfctlActive = true
+        console.log('[Spektic macOS] Kernel Firewall (pfctl) ACTIVATED. All background UDP & non-HTTP internet is dead.')
+      }
+    })
+  } catch (e) {
+    console.error('[Spektic macOS] Kernel firewall initialization error:', e)
+  }
+}
+
+function disableKernelFirewall() {
+  if (process.platform !== 'darwin') return
+  try {
+    console.log('[Spektic macOS] Disabling Kernel Firewall and restoring normal network...')
+    exec('pfctl -d 2>/dev/null; rm -f /tmp/spektic_pf.conf', () => {})
+    exec(`osascript -e 'do shell script "pfctl -d 2>/dev/null; rm -f /tmp/spektic_pf.conf" with administrator privileges'`, () => {})
+  } catch (e) {}
+}
+
+// 5. Safe System Proxy Cleanup (Guarantees Wi-Fi never stays stuck)
 function cleanupSystemProxies() {
   if (process.platform !== 'darwin') return
   try {
@@ -65,7 +99,7 @@ function cleanupSystemProxies() {
   } catch (e) {}
 }
 
-// 5. Strict Domain Whitelist for Spektic
+// 6. Strict Domain Whitelist for Spektic
 const ALLOWED_DOMAINS = [
   'spektic.com',
   'vercel.app',
@@ -80,6 +114,7 @@ function setupNetworkSecurity() {
     proxyRules: 'direct://'
   })
 
+  // Block any web request outside allowed exam/proctoring domains
   session.defaultSession.webRequest.onBeforeRequest((details, callback) => {
     try {
       const url = new URL(details.url)
@@ -98,6 +133,7 @@ function setupNetworkSecurity() {
     }
   })
 
+  // Inject SHA-256 key into request headers
   session.defaultSession.webRequest.onBeforeSendHeaders(
     { urls: ['https://*/*', 'http://*/*'] },
     (details, callback) => {
@@ -116,6 +152,7 @@ function setupNetworkSecurity() {
     }
   )
 
+  // Auto-grant camera & microphone for WebRTC AI proctoring
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
     if (permission === 'media') {
       return callback(true)
@@ -124,23 +161,28 @@ function setupNetworkSecurity() {
   })
 }
 
-// 6. ULTRA-AGGRESSIVE macOS Process Assassin (Terminates Chrome, Meet, Teams, Zoom, Audio & Screen Sharers)
-const PROHIBITED_NAMES = [
+// 7. Complete macOS Prohibited Process List (Safe Exam Browser Standard)
+const PROHIBITED_MAC_APPS = [
   'Google Chrome',
-  'Google Chrome Helper',
-  'Google Chrome Helper (Renderer)',
-  'Google Chrome Helper (GPU)',
+  'Google Chrome Canary',
   'Chromium',
   'Safari',
-  'SafariNetworking',
-  'firefox',
+  'Firefox',
   'Microsoft Edge',
-  'Microsoft Edge Helper',
   'Brave Browser',
-  'Brave Browser Helper',
   'Arc',
   'Opera',
   'Vivaldi',
+  'ScreenCaptureAgent',
+  'screencapture',
+  'AirPlayUIAgent',
+  'TouchBarAgent',
+  'QuickTime Player',
+  'Loom',
+  'Screenflow',
+  'Camtasia',
+  'obs',
+  'obs64',
   'Zoom',
   'zoom.us',
   'Microsoft Teams',
@@ -149,18 +191,8 @@ const PROHIBITED_NAMES = [
   'Skype',
   'Slack',
   'Discord',
-  'Discord Helper',
   'Telegram',
   'WhatsApp',
-  'ScreenCaptureAgent',
-  'screencapture',
-  'AirPlayUIAgent',
-  'QuickTime Player',
-  'Loom',
-  'Screenflow',
-  'Camtasia',
-  'obs',
-  'obs64',
   'TeamViewer',
   'AnyDesk',
   'Notes',
@@ -180,13 +212,6 @@ function killProhibitedProcesses() {
   if (process.platform !== 'darwin' || isQuitting || isCheckingProcesses) return
   isCheckingProcesses = true
 
-  // Method 1: killall -9 on all prohibited binary names (Instantly assassinates Google Chrome & all helpers)
-  PROHIBITED_NAMES.forEach((name) => {
-    exec(`killall -9 "${name}"`, () => {})
-    exec(`pkill -9 -i -f "${name}"`, () => {})
-  })
-
-  // Method 2: Dynamic process list sweep via ps
   exec('ps -ax -o comm=', (err, stdout) => {
     isCheckingProcesses = false
     if (err || !stdout || isQuitting) return
@@ -194,16 +219,17 @@ function killProhibitedProcesses() {
     const runningLines = stdout.split('\n')
     runningLines.forEach((line) => {
       const processPath = line.trim()
-      PROHIBITED_NAMES.forEach((appName) => {
+      PROHIBITED_MAC_APPS.forEach((appName) => {
         if (processPath.toLowerCase().includes(appName.toLowerCase())) {
-          exec(`pkill -9 -f "${appName}"`, () => {})
+          console.log(`[Spektic macOS] Terminating prohibited app: ${processPath}`)
+          exec(`pkill -f -9 "${appName}"`, () => {})
         }
       })
     })
   })
 }
 
-// 7. Multi-Monitor Secondary Screen Blackout Array
+// 8. Multi-Monitor Secondary Screen Blackout Array
 function createMultiMonitorBlackouts() {
   try {
     blackoutWindows.forEach((win) => {
@@ -243,11 +269,11 @@ function createMultiMonitorBlackouts() {
   } catch (e) {}
 }
 
-// 8. 100% Guaranteed Instant Safe-Quit Handler
+// 9. 100% Guaranteed Instant Safe-Quit Handler
 function safeQuit() {
   if (isQuitting) return
   isQuitting = true
-  console.log('[Spektic macOS] Force Quit Triggered. Restoring OS and terminating instantly.')
+  console.log('[Spektic macOS] Safe Quit Triggered. Restoring OS and terminating instantly.')
 
   if (processWatchdogTimer) clearInterval(processWatchdogTimer)
   if (clipboardTimer) clearInterval(clipboardTimer)
@@ -256,6 +282,8 @@ function safeQuit() {
     try { powerSaveBlocker.stop(powerBlockerId) } catch (e) {}
   }
 
+  // Restore Kernel Firewall and Network to 100% normal state
+  disableKernelFirewall()
   cleanupSystemProxies()
 
   try { globalShortcut.unregisterAll() } catch (e) {}
@@ -268,6 +296,7 @@ function safeQuit() {
     try { mainWindow.destroy() } catch (e) {}
   }
 
+  // Hard exit immediately
   app.exit(0)
 }
 
@@ -335,14 +364,15 @@ function injectSecurityUI(webContents) {
   } catch (e) {}
 }
 
-// 9. Create Main Lockdown Window
+// 10. Create Main Lockdown Window
 function createWindow() {
   calculateAppHash()
   cleanupSystemProxies()
   setupNetworkSecurity()
 
-  // Assassinate Google Chrome and all browsers immediately on launch
+  // Kill unauthorized background apps & enable kernel firewall
   killProhibitedProcesses()
+  enableKernelFirewall()
 
   try {
     powerBlockerId = powerSaveBlocker.start('prevent-display-sleep')
@@ -438,6 +468,7 @@ function createWindow() {
 
   // Keyboard Trap
   mainWindow.webContents.on('before-input-event', (event, input) => {
+    // Emergency Quit Shortcut: Command + Shift + Option + Q or Command + Option + Q
     if ((input.meta && input.shift && input.alt && input.key.toLowerCase() === 'q') ||
         (input.meta && input.alt && input.key.toLowerCase() === 'q')) {
       safeQuit()
@@ -473,8 +504,8 @@ function createWindow() {
   // Cover secondary displays
   createMultiMonitorBlackouts()
 
-  // Process Watchdog (Runs every 1s using killall to murder Google Chrome and meeting apps)
-  processWatchdogTimer = setInterval(killProhibitedProcesses, 1000)
+  // Process Watchdog (Runs every 1.5s to assassinate any new unauthorized background apps)
+  processWatchdogTimer = setInterval(killProhibitedProcesses, 1500)
 
   // Clipboard Eraser
   clipboardTimer = setInterval(() => {
@@ -482,7 +513,7 @@ function createWindow() {
   }, 2000)
 }
 
-// 10. App Lifecycle & Global Shortcut Registration
+// 11. App Lifecycle & Global Shortcut Registration
 app.whenReady().then(() => {
   const shortcutsToBlock = [
     'Command+Tab',
