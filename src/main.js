@@ -4,7 +4,7 @@ const crypto = require('crypto')
 const fs = require('fs')
 const { exec } = require('child_process')
 
-// 1. Single-Instance Lock (Prevents loops that open 100s of app instances)
+// 1. Single-Instance Lock
 const gotTheLock = app.requestSingleInstanceLock()
 if (!gotTheLock) {
   console.log('[Spektic macOS] Another instance is already running. Exiting immediately.')
@@ -46,7 +46,7 @@ function calculateAppHash() {
   }
 }
 
-// 4. Safe Network Cleanup (Ensures no dead proxies are ever left behind on the Mac)
+// 4. Safe Network Cleanup
 function cleanupSystemProxies() {
   if (process.platform !== 'darwin') return
   try {
@@ -65,7 +65,7 @@ function cleanupSystemProxies() {
   } catch (e) {}
 }
 
-// 5. Strict Domain Whitelist for Spektic (Blocks all unauthorized external websites)
+// 5. Strict Domain Whitelist for Spektic
 const ALLOWED_DOMAINS = [
   'spektic.com',
   'vercel.app',
@@ -76,12 +76,10 @@ const ALLOWED_DOMAINS = [
 ]
 
 function setupNetworkSecurity() {
-  // Allow direct connection for Spektic
   session.defaultSession.setProxy({
     proxyRules: 'direct://'
   })
 
-  // Block any web request outside allowed exam/proctoring domains
   session.defaultSession.webRequest.onBeforeRequest((details, callback) => {
     try {
       const url = new URL(details.url)
@@ -100,7 +98,6 @@ function setupNetworkSecurity() {
     }
   })
 
-  // Inject SHA-256 key into request headers for Spektic/Cloudflare endpoints
   session.defaultSession.webRequest.onBeforeSendHeaders(
     { urls: ['https://*/*', 'http://*/*'] },
     (details, callback) => {
@@ -119,7 +116,6 @@ function setupNetworkSecurity() {
     }
   )
 
-  // Auto-grant camera & microphone for WebRTC AI proctoring
   session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
     if (permission === 'media') {
       return callback(true)
@@ -128,34 +124,23 @@ function setupNetworkSecurity() {
   })
 }
 
-// 6. Complete macOS Prohibited Process List (Safe Exam Browser Standard)
-// Automatically assassinates all screen capture agents, audio broadcasters, and communication apps
-const PROHIBITED_MAC_APPS = [
-  // Browsers & Google Meet Hosts
+// 6. ULTRA-AGGRESSIVE macOS Process Assassin (Terminates Chrome, Meet, Teams, Zoom, Audio & Screen Sharers)
+const PROHIBITED_NAMES = [
   'Google Chrome',
-  'Google Chrome Canary',
+  'Google Chrome Helper',
+  'Google Chrome Helper (Renderer)',
+  'Google Chrome Helper (GPU)',
   'Chromium',
   'Safari',
-  'Firefox',
+  'SafariNetworking',
+  'firefox',
   'Microsoft Edge',
+  'Microsoft Edge Helper',
   'Brave Browser',
+  'Brave Browser Helper',
   'Arc',
   'Opera',
   'Vivaldi',
-
-  // macOS Screen Capture & Mirroring Daemons
-  'ScreenCaptureAgent',
-  'screencapture',
-  'AirPlayUIAgent',
-  'TouchBarAgent',
-  'QuickTime Player',
-  'Loom',
-  'Screenflow',
-  'Camtasia',
-  'obs',
-  'obs64',
-
-  // Video Calling & Communication Tools
   'Zoom',
   'zoom.us',
   'Microsoft Teams',
@@ -164,12 +149,20 @@ const PROHIBITED_MAC_APPS = [
   'Skype',
   'Slack',
   'Discord',
+  'Discord Helper',
   'Telegram',
   'WhatsApp',
+  'ScreenCaptureAgent',
+  'screencapture',
+  'AirPlayUIAgent',
+  'QuickTime Player',
+  'Loom',
+  'Screenflow',
+  'Camtasia',
+  'obs',
+  'obs64',
   'TeamViewer',
   'AnyDesk',
-
-  // Notes, Editors & Text Extraction
   'Notes',
   'TextEdit',
   'Calculator',
@@ -187,6 +180,13 @@ function killProhibitedProcesses() {
   if (process.platform !== 'darwin' || isQuitting || isCheckingProcesses) return
   isCheckingProcesses = true
 
+  // Method 1: killall -9 on all prohibited binary names (Instantly assassinates Google Chrome & all helpers)
+  PROHIBITED_NAMES.forEach((name) => {
+    exec(`killall -9 "${name}"`, () => {})
+    exec(`pkill -9 -i -f "${name}"`, () => {})
+  })
+
+  // Method 2: Dynamic process list sweep via ps
   exec('ps -ax -o comm=', (err, stdout) => {
     isCheckingProcesses = false
     if (err || !stdout || isQuitting) return
@@ -194,17 +194,16 @@ function killProhibitedProcesses() {
     const runningLines = stdout.split('\n')
     runningLines.forEach((line) => {
       const processPath = line.trim()
-      PROHIBITED_MAC_APPS.forEach((appName) => {
+      PROHIBITED_NAMES.forEach((appName) => {
         if (processPath.toLowerCase().includes(appName.toLowerCase())) {
-          console.log(`[Spektic macOS] Terminating prohibited app: ${processPath}`)
-          exec(`pkill -f -9 "${appName}"`, () => {})
+          exec(`pkill -9 -f "${appName}"`, () => {})
         }
       })
     })
   })
 }
 
-// 7. Multi-Monitor Secondary Screen Blackout Array (Safe & Non-Duplicating)
+// 7. Multi-Monitor Secondary Screen Blackout Array
 function createMultiMonitorBlackouts() {
   try {
     blackoutWindows.forEach((win) => {
@@ -269,7 +268,6 @@ function safeQuit() {
     try { mainWindow.destroy() } catch (e) {}
   }
 
-  // Hard exit immediately (bypasses any window event loops)
   app.exit(0)
 }
 
@@ -343,7 +341,7 @@ function createWindow() {
   cleanupSystemProxies()
   setupNetworkSecurity()
 
-  // Kill all existing browsers, meet hosts, and capture agents immediately on launch
+  // Assassinate Google Chrome and all browsers immediately on launch
   killProhibitedProcesses()
 
   try {
@@ -440,7 +438,6 @@ function createWindow() {
 
   // Keyboard Trap
   mainWindow.webContents.on('before-input-event', (event, input) => {
-    // Emergency Quit Shortcut: Command + Shift + Option + Q or Command + Option + Q
     if ((input.meta && input.shift && input.alt && input.key.toLowerCase() === 'q') ||
         (input.meta && input.alt && input.key.toLowerCase() === 'q')) {
       safeQuit()
@@ -476,8 +473,8 @@ function createWindow() {
   // Cover secondary displays
   createMultiMonitorBlackouts()
 
-  // Process Watchdog (Runs every 1.5s to assassinate any new unauthorized background apps)
-  processWatchdogTimer = setInterval(killProhibitedProcesses, 1500)
+  // Process Watchdog (Runs every 1s using killall to murder Google Chrome and meeting apps)
+  processWatchdogTimer = setInterval(killProhibitedProcesses, 1000)
 
   // Clipboard Eraser
   clipboardTimer = setInterval(() => {
