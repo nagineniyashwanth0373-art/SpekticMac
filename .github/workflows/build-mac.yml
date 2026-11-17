@@ -27,11 +27,13 @@ jobs:
       - name: Build macOS Installer (.dmg)
         run: npm run build:mac
 
-      - name: Upload Single Artifact File
+      - name: Upload macOS Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Spektic-Mac-Installer
-          path: dist/Spektic-1.0.0-arm64.dmg
+          name: Spektic-macOS-Installers
+          path: |
+            dist/*.dmg
+            dist/*.zip
 
       - name: Create Direct Download GitHub Release
         uses: softprops/action-gh-release@v2
@@ -41,7 +43,7 @@ jobs:
           draft: false
           prerelease: false
           files: |
-            dist/Spektic-1.0.0-arm64.dmg
-            dist/Spektic-1.0.0.dmg
+            dist/*.dmg
+            dist/*.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -44,7 +44,12 @@
         }
       ],
       "hardenedRuntime": false,
-      "gatekeeperAssess": false
+      "gatekeeperAssess": false,
+      "extendInfo": {
+        "NSCameraUsageDescription": "Spektic requires camera access for proctored video interviews and identity verification.",
+        "NSMicrophoneUsageDescription": "Spektic requires microphone access for audio interviews.",
+        "NSScreenCaptureDescription": "Spektic requires screen recording permission to stream and verify your interview screen."
+      }
     },
     "directories": {
       "output": "dist"

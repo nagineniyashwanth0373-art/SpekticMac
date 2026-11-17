@@ -1,4 +1,4 @@
-const { app, BrowserWindow, globalShortcut, session, powerSaveBlocker, clipboard, screen, ipcMain } = require('electron')
+const { app, BrowserWindow, globalShortcut, session, powerSaveBlocker, clipboard, screen, ipcMain, desktopCapturer, systemPreferences } = require('electron')
 const path = require('path')
 const crypto = require('crypto')
 const fs = require('fs')
@@ -8,12 +8,20 @@ const { exec, execSync } = require('child_process')
 const gotTheLock = app.requestSingleInstanceLock()
 if (!gotTheLock) { app.exit(0) }
 
+// Standard Modern Chrome User Agent for macOS (ensures Google Meet and Zoom work seamlessly)
+const MAC_CHROME_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+app.userAgentFallback = MAC_CHROME_UA
+
 // 2. WebRTC & Media Permissions CommandLine Switches
 app.commandLine.appendSwitch('remote-debugging-port', '0')
 app.commandLine.appendSwitch('disable-renderer-accessibility', '1')
 app.commandLine.appendSwitch('enable-usermedia-screen-capturing')
-app.commandLine.appendSwitch('auto-select-desktop-capture-source', 'Screen')
+app.commandLine.appendSwitch('allow-http-screen-capture')
 app.commandLine.appendSwitch('use-fake-ui-for-media-stream')
+app.commandLine.appendSwitch('enable-webrtc-hw-decoding')
+app.commandLine.appendSwitch('enable-webrtc-hw-encoding')
+app.commandLine.appendSwitch('enable-gpu')
+app.commandLine.appendSwitch('ignore-gpu-blocklist')
 
 process.on('uncaughtException', (err) => { 
   console.error('[Spektic] Uncaught:', err)
@@ -189,18 +197,30 @@ function disableNetworkLockdown() {
 
 // 5. Internal Network Security for Spektic Chromium Engine
 // Spektic uses direct:// to bypass system proxies completely,
-// ensuring Teams, Google Meet, WebRTC, and exams connect at 100% full speed.
+// ensuring Google Meet, Zoom, WebRTC, and exams connect at 100% full speed.
 const ALLOWED_DOMAINS = [
   'spektic.com', 'vercel.app', 'workers.dev', 'livekit.cloud', 'localhost', '127.0.0.1',
-  'teams.microsoft.com', 'teams.live.com', 'skype.com', 'microsoft.com', 'microsoftonline.com', 'live.com', 'office.com',
   'meet.google.com', 'google.com', 'gstatic.com', 'googleusercontent.com',
   'zoom.us',
   'hackerrank.com', 'codility.com', 'leetcode.com', 'github.com'
 ]
 
+async function requestMediaAccess() {
+  if (process.platform === 'darwin' && systemPreferences && systemPreferences.askForMediaAccess) {
+    try {
+      const cam = await systemPreferences.askForMediaAccess('camera')
+      const mic = await systemPreferences.askForMediaAccess('microphone')
+      logLockdown(`macOS Media Permissions - Camera: ${cam}, Mic: ${mic}`)
+    } catch (e) {
+      logLockdown(`⚠️ Error requesting media permissions: ${e.message}`)
+    }
+  }
+}
+
 function setupNetworkSecurity() {
   // CRITICAL: direct:// bypasses the blackhole system proxy we set for other apps!
   session.defaultSession.setProxy({ proxyRules: 'direct://' })
+  session.defaultSession.setUserAgent(MAC_CHROME_UA)
 
   session.defaultSession.webRequest.onBeforeRequest((details, callback) => {
     try {
@@ -226,14 +246,15 @@ function setupNetworkSecurity() {
         if (url.includes('spektic.com') || url.includes('vercel.app') || url.includes('workers.dev')) {
           details.requestHeaders['x-secure-exam-key'] = appHash
         }
+        details.requestHeaders['User-Agent'] = MAC_CHROME_UA
       } catch (e) {}
       callback({ requestHeaders: details.requestHeaders })
     }
   )
 
-  // Full WebRTC & Media Permissions for Microsoft Teams & Google Meet
+  // Full WebRTC & Media Permissions for Google Meet, Zoom, and LiveKit
   session.defaultSession.setPermissionRequestHandler((wc, permission, cb) => {
-    if (permission === 'media' || permission === 'display-capture' || permission === 'notifications') {
+    if (permission === 'media' || permission === 'display-capture' || permission === 'notifications' || permission === 'fullscreen') {
       return cb(true)
     }
     cb(true)
@@ -241,6 +262,20 @@ function setupNetworkSecurity() {
 
   session.defaultSession.setPermissionCheckHandler((wc, permission, origin) => {
     return true
+  })
+
+  // Automatically satisfy getDisplayMedia requests (Google Meet / Zoom screen share)
+  session.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
+    desktopCapturer.getSources({ types: ['screen'] }).then((sources) => {
+      if (sources && sources.length > 0) {
+        callback({ video: sources[0], audio: 'loopback' })
+      } else {
+        callback({})
+      }
+    }).catch((err) => {
+      logLockdown(`⚠️ Desktop capturer error: ${err.message}`)
+      callback({})
+    })
   })
 }
 
@@ -379,7 +414,7 @@ function injectSecurityUI(wc) {
           const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
           let node;
           while (node = walker.nextNode()) {
-            if (node.nodeValue && /meeting\\s*id|passcode|teams\\.microsoft\\.com\\/l\\/meetup/i.test(node.nodeValue)) {
+            if (node.nodeValue && /(?:meeting\s*id|passcode)\s*[:=]\s*\w+/i.test(node.nodeValue)) {
               node.nodeValue = '[Meeting Shield Protected]';
             }
           }
@@ -414,8 +449,12 @@ function createWindow() {
   mainWindow.setContentProtection(true)
   mainWindow.setAlwaysOnTop(true, 'screen-saver')
   mainWindow.setVisibleOnAllWorkspaces(true)
+  mainWindow.webContents.setUserAgent(MAC_CHROME_UA)
   mainWindow.webContents.on('context-menu', e => { e.preventDefault() })
-  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    mainWindow.loadURL(url)
+    return { action: 'deny' }
+  })
 
   mainWindow.webContents.on('will-navigate', (event, url) => {
     const u = url.toLowerCase()
@@ -465,13 +504,19 @@ function createWindow() {
 }
 
 // 11. App Lifecycle & Failsafe Signals
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   const shortcuts = [
     'Command+Tab', 'Command+Q', 'Command+W', 'Command+Space',
     'Command+Option+Esc', 'Command+Shift+3', 'Command+Shift+4', 'Command+Shift+5'
   ]
   shortcuts.forEach(sc => { try { globalShortcut.register(sc, () => {}) } catch (e) {} })
   try { globalShortcut.register('Command+Shift+Option+Q', () => { safeQuit() }) } catch (e) {}
+
+  await requestMediaAccess()
+
+  // Dynamic monitor connect/disconnect handlers
+  screen.on('display-added', () => { createMultiMonitorBlackouts() })
+  screen.on('display-removed', () => { createMultiMonitorBlackouts() })
 
   // 1. Isolate system network (blocks other apps)
   // 2. Open exam window (with direct:// high-speed connectivity)
