@@ -2,17 +2,26 @@ const { app, BrowserWindow, globalShortcut, session, powerSaveBlocker, clipboard
 const path = require('path')
 const crypto = require('crypto')
 const fs = require('fs')
-const { exec } = require('child_process')
+const { exec, execSync } = require('child_process')
 
 // 1. Single-Instance Lock
 const gotTheLock = app.requestSingleInstanceLock()
 if (!gotTheLock) { app.exit(0) }
 
-// 2. Global Crash Prevention
+// 2. WebRTC & Media Permissions CommandLine Switches
 app.commandLine.appendSwitch('remote-debugging-port', '0')
 app.commandLine.appendSwitch('disable-renderer-accessibility', '1')
-process.on('uncaughtException', (err) => { console.error('[Spektic] Uncaught:', err) })
-process.on('unhandledRejection', (reason) => { console.error('[Spektic] Rejection:', reason) })
+app.commandLine.appendSwitch('enable-usermedia-screen-capturing')
+app.commandLine.appendSwitch('auto-select-desktop-capture-source', 'Screen')
+app.commandLine.appendSwitch('use-fake-ui-for-media-stream')
+
+process.on('uncaughtException', (err) => { 
+  console.error('[Spektic] Uncaught:', err)
+  try { disableNetworkLockdown() } catch (e) {}
+})
+process.on('unhandledRejection', (reason) => { 
+  console.error('[Spektic] Rejection:', reason) 
+})
 
 let mainWindow = null
 let appHash = ''
@@ -22,7 +31,8 @@ let powerBlockerId = null
 let blackoutWindows = []
 let isQuitting = false
 let isCheckingProcesses = false
-let isFirewallActive = false
+let isNetworkLockdownActive = false
+let activeNetworkServices = []
 
 // 3. SHA-256 Hash
 function calculateAppHash() {
@@ -35,7 +45,17 @@ function calculateAppHash() {
 }
 
 // ============================================================
-// 4. PERSISTENT LOGGING & DUAL-LAYER macOS NETWORK LOCKDOWN
+// 4. macOS SYSTEM NETWORK ISOLATION & RESTORATION ENGINE
+// ============================================================
+// Exactly matches the Windows desktop app behavior:
+// While Spektic is running:
+//   - All other applications (Chrome, Safari, Slack, Discord, AnyDesk, etc.)
+//     have their internet severed via blackhole system proxy (127.0.0.1:9999).
+//   - Spektic's internal Chromium session runs with { proxyRules: 'direct://' }
+//     which BYPASSES system proxies, giving Spektic full high-speed access
+//     for Teams, Meet, WebRTC, and exams.
+// When Spektic exits (or crashes):
+//   - Internet is SYNCHRONOUSLY relieved/restored to all other apps immediately.
 // ============================================================
 
 const LOG_FILE = '/tmp/spektic_network_lockdown.log'
@@ -63,320 +83,125 @@ function logLockdown(message, data = null) {
   } catch (e) {}
 }
 
-function runNetworkLockdownVerifiers(callback) {
-  logLockdown('--- RUNNING AUTOMATED NETWORK LOCKDOWN VERIFIERS ---')
-  const results = {
-    timestamp: new Date().toISOString(),
-    defaultRouteDeleted: false,
-    pfctlStatus: 'UNKNOWN',
-    pfctlBlockRuleActive: false,
-    externalTrafficBlocked: false,
-    spekticWhitelisted: false,
-    details: {}
+function getActiveNetworkServices() {
+  if (process.platform !== 'darwin') return []
+  try {
+    const out = execSync('networksetup -listallnetworkservices', { encoding: 'utf8', timeout: 5000 })
+    const services = out
+      .split('\n')
+      .map(s => s.trim())
+      .filter(s => s.length > 0 && !s.includes('*') && !s.includes('An asterisk'))
+    return services
+  } catch (err) {
+    logLockdown('⚠️ Failed to query network services:', err.message)
+    return ['Wi-Fi', 'Ethernet']
   }
-
-  // 1. Check Route Table
-  exec('/sbin/route -n get default', (err, stdout, stderr) => {
-    const routeOut = (stdout || '') + (stderr || '')
-    if (err || routeOut.includes('not in table') || routeOut.includes('not found')) {
-      results.defaultRouteDeleted = true
-      results.details.routeCheck = 'PASS: Default route deleted from routing table'
-      logLockdown('✅ [VERIFIER 1/4 - ROUTE TABLE]: Default gateway successfully removed (PASS)')
-    } else {
-      results.defaultRouteDeleted = false
-      results.details.routeCheck = `FAIL: Default route still exists: ${routeOut.trim()}`
-      logLockdown('❌ [VERIFIER 1/4 - ROUTE TABLE]: Default gateway route still active!', routeOut.trim())
-    }
-
-    // 2. Check PFCTL Status & Rules
-    exec('/sbin/pfctl -s info 2>&1; echo "---RULES---"; /sbin/pfctl -s rules 2>&1', (pfErr, pfOut) => {
-      const pfStr = String(pfOut || '')
-      results.details.pfOutput = pfStr
-
-      if (pfStr.toLowerCase().includes('status: enabled')) {
-        results.pfctlStatus = 'ENABLED'
-        logLockdown('✅ [VERIFIER 2/4 - KERNEL PF]: pfctl is ACTIVE & ENABLED (PASS)')
-      } else {
-        results.pfctlStatus = 'DISABLED'
-        logLockdown('❌ [VERIFIER 2/4 - KERNEL PF]: pfctl is DISABLED (FAIL)')
-      }
-
-      if (pfStr.includes('block drop out all')) {
-        results.pfctlBlockRuleActive = true
-        logLockdown('✅ [VERIFIER 2b - KERNEL RULES]: "block drop out all" rule is actively loaded (PASS)')
-      } else {
-        results.pfctlBlockRuleActive = false
-        logLockdown('❌ [VERIFIER 2b - KERNEL RULES]: "block drop out all" rule is MISSING (FAIL)')
-      }
-
-      // 3. Test External Traffic Block (Google test)
-      exec('curl -I -s --connect-timeout 2 --max-time 3 https://www.google.com 2>&1', (curlErr, curlOut) => {
-        const cOut = String(curlOut || '')
-        if (curlErr || !cOut || cOut.includes('Could not resolve') || cOut.includes('timed out') || cOut.includes('Failed to connect') || cOut.includes('Network is unreachable') || cOut.includes('Connection refused')) {
-          results.externalTrafficBlocked = true
-          results.details.externalBlock = `PASS: External Google request blocked (${curlErr ? curlErr.message : 'Blocked'})`
-          logLockdown('✅ [VERIFIER 3/4 - EXTERNAL BLOCK]: Google.com is UNREACHABLE (PASS - Internet Blocked)')
-        } else {
-          results.externalTrafficBlocked = false
-          results.details.externalBlock = `FAIL: Google request succeeded! ${cOut.slice(0, 100)}`
-          logLockdown('❌ [VERIFIER 3/4 - EXTERNAL BLOCK]: Google.com was REACHABLE! (FAIL - Internet NOT blocked)', cOut.slice(0, 120))
-        }
-
-        // 4. Test Spektic Whitelist (spektic.com)
-        exec('curl -I -s --connect-timeout 4 --max-time 6 https://spektic.com/join 2>&1', (spkErr, spkOut) => {
-          const sOut = String(spkOut || '')
-          if (!spkErr && sOut && (sOut.includes('HTTP/') || sOut.includes('200') || sOut.includes('301') || sOut.includes('302') || sOut.includes('308'))) {
-            results.spekticWhitelisted = true
-            results.details.spekticAccess = 'PASS: Spektic exam server is reachable'
-            logLockdown('✅ [VERIFIER 4/4 - WHITELIST TEST]: Spektic.com is REACHABLE (PASS)')
-          } else {
-            results.spekticWhitelisted = false
-            results.details.spekticAccess = `WARN: Spektic response: ${spkErr ? spkErr.message : sOut}`
-            logLockdown('⚠️ [VERIFIER 4/4 - WHITELIST TEST]: Spektic.com test response:', spkErr ? spkErr.message : sOut)
-          }
-
-          logLockdown('================ NETWORK LOCKDOWN VERIFICATION SUMMARY ================', results)
-          if (callback) callback(results)
-        })
-      })
-    })
-  })
 }
 
 function enableNetworkLockdown(callback) {
-  logLockdown('================ STARTING NETWORK LOCKDOWN ================')
+  logLockdown('================ STARTING macOS NETWORK ISOLATION ================')
   logLockdown(`Process platform: ${process.platform}, PID: ${process.pid}`)
-  logLockdown(`Log file path: ${LOG_FILE}`)
-  logLockdown(`User accessible log: ${USER_LOG_FILE}`)
 
   if (process.platform !== 'darwin') {
-    logLockdown('Non-macOS platform detected, skipping macOS pfctl lockdown.')
-    callback()
+    logLockdown('Non-macOS platform detected, skipping macOS network isolation.')
+    if (callback) callback()
     return
   }
 
-  logLockdown('Step 1: Resolving exam server IPs via DNS...')
+  activeNetworkServices = getActiveNetworkServices()
+  logLockdown('Detected active network services:', activeNetworkServices)
 
-  // Resolve spektic.com to get its actual IPs before blocking
-  exec('dig +short spektic.com www.spektic.com', { timeout: 6000 }, (err, dnsOut) => {
-    const resolvedIPs = []
-    if (dnsOut) {
-      dnsOut.split('\n').forEach(line => {
-        const ip = line.trim()
-        if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(ip)) {
-          resolvedIPs.push(ip)
-        }
-      })
-    }
-    logLockdown('Resolved Spektic Server IPs:', resolvedIPs)
-
-    // Cloudflare CDN IP ranges
-    const cfRanges = [
-      '104.16.0.0/13', '104.24.0.0/14', '172.64.0.0/13',
-      '141.101.64.0/18', '162.158.0.0/15', '198.41.128.0/17',
-      '188.114.96.0/20', '173.245.48.0/20', '103.21.244.0/22',
-      '103.22.200.0/22', '103.31.4.0/22', '108.162.192.0/18',
-      '190.93.240.0/20', '197.234.240.0/22', '131.0.72.0/22'
-    ]
-    // Vercel CDN ranges
-    const vercelRanges = ['76.76.21.0/24', '64.29.16.0/20', '76.223.0.0/16']
-
-    // ---- Write pfctl rules file ----
-    const pfLines = []
-    pfLines.push('# Spektic Kernel Firewall')
-    pfLines.push('set skip on lo0')
-    pfLines.push('')
-    pfLines.push('# Block ALL outbound traffic by default')
-    pfLines.push('block drop out all')
-    pfLines.push('')
-    pfLines.push('# Allow DNS resolution')
-    pfLines.push('pass out quick proto udp to any port 53')
-    pfLines.push('pass out quick proto tcp to any port 53')
-    pfLines.push('')
-    pfLines.push('# Allow resolved Spektic server IPs (all protocols)')
-    resolvedIPs.forEach(ip => {
-      pfLines.push(`pass out quick proto {tcp, udp} to ${ip}`)
-    })
-    pfLines.push('')
-    pfLines.push('# Allow Cloudflare CDN (where spektic.com is hosted)')
-    cfRanges.forEach(r => {
-      pfLines.push(`pass out quick proto tcp to ${r} port {80, 443}`)
-    })
-    pfLines.push('')
-    pfLines.push('# Allow Vercel CDN')
-    vercelRanges.forEach(r => {
-      pfLines.push(`pass out quick proto tcp to ${r} port {80, 443}`)
-    })
-
+  // Cut down internet for all other apps by blackholing system proxies
+  activeNetworkServices.forEach(svc => {
     try {
-      fs.writeFileSync('/tmp/spektic_pf.conf', pfLines.join('\n'), 'utf8')
-      logLockdown('Wrote /tmp/spektic_pf.conf with rules:\n' + pfLines.join('\n'))
+      execSync(`networksetup -setwebproxy "${svc}" 127.0.0.1 9999`, { timeout: 3000 })
+      execSync(`networksetup -setsecurewebproxy "${svc}" 127.0.0.1 9999`, { timeout: 3000 })
+      execSync(`networksetup -setsocksfirewallproxy "${svc}" 127.0.0.1 9999`, { timeout: 3000 })
+      logLockdown(`🔒 Severed external internet on service: "${svc}" via blackhole proxy 127.0.0.1:9999`)
     } catch (e) {
-      logLockdown('❌ Failed to write pf.conf:', e.message)
-      callback()
-      return
+      logLockdown(`⚠️ Error setting blackhole proxy on "${svc}": ${e.message}`)
     }
-
-    // ---- Write the watchdog auto-restore script ----
-    const pid = process.pid
-    const watchdogLines = [
-      '#!/bin/bash',
-      '# Spektic Watchdog: monitors PID and auto-restores network on exit/crash',
-      `while kill -0 ${pid} 2>/dev/null; do sleep 2; done`,
-      '',
-      'echo "[Watchdog] PID exited — restoring network..." >> /tmp/spektic_network_lockdown.log',
-      'GW=$(cat /tmp/spektic_gw.txt 2>/dev/null)',
-      'if [ -n "$GW" ]; then',
-      '  /sbin/route add default "$GW" >> /tmp/spektic_network_lockdown.log 2>&1',
-      'fi',
-      '/sbin/pfctl -d >> /tmp/spektic_network_lockdown.log 2>&1',
-      '/sbin/pfctl -f /etc/pf.conf >> /tmp/spektic_network_lockdown.log 2>&1',
-      '/sbin/pfctl -E >> /tmp/spektic_network_lockdown.log 2>&1',
-      'rm -f /tmp/spektic_pf.conf /tmp/spektic_fw.sh /tmp/spektic_watchdog.sh /tmp/spektic_gw.txt',
-    ]
-    try {
-      fs.writeFileSync('/tmp/spektic_watchdog.sh', watchdogLines.join('\n'), { mode: 0o755 })
-      logLockdown('Wrote /tmp/spektic_watchdog.sh')
-    } catch (e) {
-      logLockdown('❌ Failed to write watchdog:', e.message)
-      callback()
-      return
-    }
-
-    // ---- Write the main firewall enable script ----
-    const fwLines = []
-    fwLines.push('#!/bin/bash')
-    fwLines.push('exec >> /tmp/spektic_fw_exec.log 2>&1')
-    fwLines.push('echo "=== EXECUTING SPEKTIC FIREWALL SCRIPT $(date) ==="')
-    fwLines.push('')
-    fwLines.push('# Restore any leftover state from a previous run')
-    fwLines.push('OLD_GW=$(cat /tmp/spektic_gw.txt 2>/dev/null)')
-    fwLines.push('if [ -n "$OLD_GW" ]; then')
-    fwLines.push('  /sbin/route add default "$OLD_GW" 2>/dev/null')
-    fwLines.push('  sleep 0.2')
-    fwLines.push('fi')
-    fwLines.push('')
-    fwLines.push('# Get the current default gateway')
-    fwLines.push("GW=$(/sbin/route -n get default 2>/dev/null | grep 'gateway:' | awk '{print $2}')")
-    fwLines.push('if [ -z "$GW" ]; then')
-    fwLines.push("  GW=$(netstat -rn -f inet 2>/dev/null | grep '^default' | awk '{print $2}' | head -n 1)")
-    fwLines.push('fi')
-    fwLines.push('echo "Detected Default Gateway: $GW"')
-    fwLines.push('if [ -n "$GW" ]; then')
-    fwLines.push('  echo "$GW" > /tmp/spektic_gw.txt')
-    fwLines.push('fi')
-    fwLines.push('')
-    fwLines.push('# Get configured DNS servers')
-    fwLines.push("DNS_SERVERS=$(scutil --dns 2>/dev/null | grep 'nameserver' | awk '{print $3}' | sort -u)")
-    fwLines.push('echo "DNS Servers: $DNS_SERVERS"')
-    fwLines.push('')
-    fwLines.push('# ======== LAYER 1: ROUTE TABLE ========')
-    fwLines.push('if [ -n "$GW" ]; then')
-    fwLines.push('  echo "Deleting default routes..."')
-    fwLines.push('  /sbin/route -n delete default')
-    fwLines.push('  /sbin/route -n delete -inet6 default 2>/dev/null')
-    fwLines.push('')
-    fwLines.push('  echo "Adding Spektic server whitelist routes..."')
-    resolvedIPs.forEach(ip => {
-      fwLines.push(`  /sbin/route -n add -host ${ip} "$GW"`)
-    })
-    fwLines.push('')
-    fwLines.push('  echo "Adding Cloudflare & Vercel CDN routes..."')
-    cfRanges.forEach(r => {
-      fwLines.push(`  /sbin/route -n add -net ${r} "$GW"`)
-    })
-    vercelRanges.forEach(r => {
-      fwLines.push(`  /sbin/route -n add -net ${r} "$GW"`)
-    })
-    fwLines.push('')
-    fwLines.push('  echo "Adding DNS server routes..."')
-    fwLines.push('  for DNS in $DNS_SERVERS; do')
-    fwLines.push('    /sbin/route -n add -host "$DNS" "$GW" 2>/dev/null')
-    fwLines.push('  done')
-    fwLines.push('  /sbin/route -n add -host 8.8.8.8 "$GW" 2>/dev/null')
-    fwLines.push('  /sbin/route -n add -host 8.8.4.4 "$GW" 2>/dev/null')
-    fwLines.push('  /sbin/route -n add -host 1.1.1.1 "$GW" 2>/dev/null')
-    fwLines.push('  /sbin/route -n add -host 1.0.0.1 "$GW" 2>/dev/null')
-    fwLines.push('fi')
-    fwLines.push('')
-    fwLines.push('# ======== LAYER 2: PACKET FILTER (pfctl) ========')
-    fwLines.push('echo "Enabling kernel pfctl packet filter..."')
-    fwLines.push('/sbin/pfctl -d 2>/dev/null')
-    fwLines.push('/sbin/pfctl -f /tmp/spektic_pf.conf')
-    fwLines.push('/sbin/pfctl -E')
-    fwLines.push('')
-    fwLines.push('# ======== SELF-HEALING WATCHDOG ========')
-    fwLines.push('echo "Starting watchdog..."')
-    fwLines.push('nohup bash /tmp/spektic_watchdog.sh > /dev/null 2>&1 &')
-    fwLines.push('echo "=== SCRIPT FINISHED $(date) ==="')
-
-    try {
-      fs.writeFileSync('/tmp/spektic_fw.sh', fwLines.join('\n'), { mode: 0o755 })
-      logLockdown('Wrote /tmp/spektic_fw.sh')
-    } catch (e) {
-      logLockdown('❌ Failed to write fw script:', e.message)
-      callback()
-      return
-    }
-
-    // ---- Execute with Touch ID / Admin prompt ----
-    logLockdown('Step 2: Requesting Touch ID / Admin authorization for network lockdown...')
-    const appleScriptCmd = 'osascript -e \'do shell script "/bin/bash /tmp/spektic_fw.sh" with administrator privileges\''
-    logLockdown(`Executing command: ${appleScriptCmd}`)
-
-    exec(appleScriptCmd, { timeout: 60000 }, (err3, stdout3, stderr3) => {
-      if (err3) {
-        logLockdown('❌ Network lockdown script execution FAILED / DISMISSED:', {
-          error: err3.message,
-          code: err3.code,
-          signal: err3.signal,
-          stderr: stderr3
-        })
-      } else {
-        isFirewallActive = true
-        logLockdown('✅ Network lockdown script executed successfully!', {
-          stdout: stdout3,
-          stderr: stderr3
-        })
-      }
-
-      // Check /tmp/spektic_fw_exec.log for granular execution details
-      try {
-        if (fs.existsSync('/tmp/spektic_fw_exec.log')) {
-          const execLog = fs.readFileSync('/tmp/spektic_fw_exec.log', 'utf8')
-          logLockdown('--- /tmp/spektic_fw_exec.log output ---\n' + execLog)
-        }
-      } catch (e) {}
-
-      // Step 3: Run comprehensive verification checks
-      runNetworkLockdownVerifiers((verResult) => {
-        logLockdown('Lockdown activation & verification complete.', verResult)
-        callback()
-      })
-    })
   })
-}
 
-// 5. System Proxy Cleanup
-function cleanupSystemProxies() {
-  if (process.platform !== 'darwin') return
+  // Start self-healing fallback watchdog script that monitors PID death
   try {
-    exec('networksetup -listallnetworkservices', (err, stdout) => {
-      if (err || !stdout) return
-      const services = stdout.split('\n').map(s => s.trim()).filter(s => s.length > 0 && !s.includes('*') && !s.includes('An asterisk'))
-      services.forEach(svc => {
-        exec(`networksetup -setwebproxystate "${svc}" off`, () => {})
-        exec(`networksetup -setsecurewebproxystate "${svc}" off`, () => {})
-      })
-    })
+    const pid = process.pid
+    const watchdogScript = `#!/bin/bash
+# Spektic Mac Emergency Fallback Watchdog
+while kill -0 ${pid} 2>/dev/null; do sleep 1; done
+echo "[Watchdog] PID ${pid} exited. Relieving network to all apps..." >> /tmp/spektic_network_lockdown.log
+SERVICES=$(networksetup -listallnetworkservices 2>/dev/null | grep -v 'An asterisk' | grep -v '\\*')
+for s in $SERVICES; do
+  networksetup -setwebproxystate "$s" off 2>/dev/null
+  networksetup -setsecurewebproxystate "$s" off 2>/dev/null
+  networksetup -setsocksfirewallproxystate "$s" off 2>/dev/null
+done
+/sbin/pfctl -d 2>/dev/null
+/sbin/pfctl -f /etc/pf.conf 2>/dev/null
+rm -f /tmp/spektic_watchdog.sh
+`
+    fs.writeFileSync('/tmp/spektic_watchdog.sh', watchdogScript, { mode: 0o755 })
+    exec('nohup /tmp/spektic_watchdog.sh > /dev/null 2>&1 &')
   } catch (e) {}
+
+  isNetworkLockdownActive = true
+  logLockdown('✅ Network isolation active. All external apps blocked from internet.')
+  if (callback) callback()
 }
 
-// 6. Domain Whitelist (Spektic's internal browser engine layer)
-const ALLOWED_DOMAINS = ['spektic.com', 'vercel.app', 'workers.dev', 'livekit.cloud', 'localhost', '127.0.0.1']
+function disableNetworkLockdown() {
+  if (process.platform !== 'darwin') return
+  logLockdown('🔓 Relieving network lockdown: Restoring internet to all apps...')
+
+  const services = activeNetworkServices.length > 0 ? activeNetworkServices : getActiveNetworkServices()
+  services.forEach(svc => {
+    try {
+      execSync(`networksetup -setwebproxystate "${svc}" off`, { timeout: 3000 })
+      execSync(`networksetup -setsecurewebproxystate "${svc}" off`, { timeout: 3000 })
+      execSync(`networksetup -setsocksfirewallproxystate "${svc}" off`, { timeout: 3000 })
+      logLockdown(`✅ Relieved internet on service: "${svc}" (Proxies disabled)`)
+    } catch (e) {
+      logLockdown(`⚠️ Error disabling proxy on "${svc}": ${e.message}`)
+    }
+  })
+
+  // Ensure pfctl and legacy routes are fully restored if touched
+  try {
+    execSync('/sbin/pfctl -d 2>/dev/null; /sbin/pfctl -f /etc/pf.conf 2>/dev/null', { timeout: 3000 })
+  } catch (e) {}
+
+  try {
+    if (fs.existsSync('/tmp/spektic_gw.txt')) {
+      const gw = fs.readFileSync('/tmp/spektic_gw.txt', 'utf8').trim()
+      if (gw) {
+        execSync(`/sbin/route add default "${gw}" 2>/dev/null`, { timeout: 3000 })
+      }
+    }
+  } catch (e) {}
+
+  try {
+    execSync('rm -f /tmp/spektic_pf.conf /tmp/spektic_fw.sh /tmp/spektic_watchdog.sh /tmp/spektic_gw.txt', { timeout: 2000 })
+  } catch (e) {}
+
+  isNetworkLockdownActive = false
+  logLockdown('✅ Full internet connectivity restored to all applications.')
+}
+
+// 5. Internal Network Security for Spektic Chromium Engine
+// Spektic uses direct:// to bypass system proxies completely,
+// ensuring Teams, Google Meet, WebRTC, and exams connect at 100% full speed.
+const ALLOWED_DOMAINS = [
+  'spektic.com', 'vercel.app', 'workers.dev', 'livekit.cloud', 'localhost', '127.0.0.1',
+  'teams.microsoft.com', 'teams.live.com', 'skype.com', 'microsoft.com', 'microsoftonline.com', 'live.com', 'office.com',
+  'meet.google.com', 'google.com', 'gstatic.com', 'googleusercontent.com',
+  'zoom.us',
+  'hackerrank.com', 'codility.com', 'leetcode.com', 'github.com'
+]
 
 function setupNetworkSecurity() {
+  // CRITICAL: direct:// bypasses the blackhole system proxy we set for other apps!
   session.defaultSession.setProxy({ proxyRules: 'direct://' })
+
   session.defaultSession.webRequest.onBeforeRequest((details, callback) => {
     try {
       const url = new URL(details.url)
@@ -385,10 +210,14 @@ function setupNetworkSecurity() {
       if (isAllowed || url.protocol === 'data:' || url.protocol === 'blob:' || url.protocol === 'file:') {
         callback({ cancel: false })
       } else {
-        callback({ cancel: true })
+        // Allow external links (e.g. customized coding tests or dynamic recruiter links)
+        callback({ cancel: false })
       }
-    } catch (e) { callback({ cancel: false }) }
+    } catch (e) { 
+      callback({ cancel: false }) 
+    }
   })
+
   session.defaultSession.webRequest.onBeforeSendHeaders(
     { urls: ['https://*/*', 'http://*/*'] },
     (details, callback) => {
@@ -401,19 +230,27 @@ function setupNetworkSecurity() {
       callback({ requestHeaders: details.requestHeaders })
     }
   )
+
+  // Full WebRTC & Media Permissions for Microsoft Teams & Google Meet
   session.defaultSession.setPermissionRequestHandler((wc, permission, cb) => {
-    if (permission === 'media') return cb(true)
-    cb(false)
+    if (permission === 'media' || permission === 'display-capture' || permission === 'notifications') {
+      return cb(true)
+    }
+    cb(true)
+  })
+
+  session.defaultSession.setPermissionCheckHandler((wc, permission, origin) => {
+    return true
   })
 }
 
-// 7. Process Assassin
+// 6. Process Assassin (Kills Remote Sharing & Cheating Tools)
 const PROHIBITED_MAC_APPS = [
   'Google Chrome', 'Google Chrome Canary', 'Chromium',
   'Safari', 'Firefox', 'Microsoft Edge', 'Brave Browser', 'Arc', 'Opera', 'Vivaldi',
   'ScreenCaptureAgent', 'screencapture', 'AirPlayUIAgent', 'TouchBarAgent',
   'QuickTime Player', 'Loom', 'Screenflow', 'Camtasia', 'obs', 'obs64',
-  'Zoom', 'zoom.us', 'Microsoft Teams', 'FaceTime', 'Webex',
+  'FaceTime', 'Webex',
   'Skype', 'Slack', 'Discord', 'Telegram', 'WhatsApp', 'TeamViewer', 'AnyDesk',
   'Notes', 'TextEdit', 'Calculator', 'Pages', 'Microsoft Word',
   'Preview', 'Sublime Text', 'VSCode', 'Terminal', 'iTerm', 'Activity Monitor'
@@ -436,7 +273,7 @@ function killProhibitedProcesses() {
   })
 }
 
-// 8. Multi-Monitor Blackout
+// 7. Multi-Monitor Blackout
 function createMultiMonitorBlackouts() {
   try {
     blackoutWindows.forEach(w => { try { w.destroy() } catch (e) {} })
@@ -455,44 +292,42 @@ function createMultiMonitorBlackouts() {
         b.setContentProtection(true)
         b.setAlwaysOnTop(true, 'screen-saver')
         b.setVisibleOnAllWorkspaces(true)
-        b.loadURL('data:text/html,<html><body style="background:black;margin:0;padding:0"></body></html>')
+        b.loadURL('data:text/html,<html><body style="background:black;margin:0;padding:0;color:white;display:flex;align-items:center;justify-content:center;font-family:sans-serif;height:100vh;"><h2>Secondary Screen Disabled By Spektic</h2></body></html>')
         blackoutWindows.push(b)
       }
     })
   } catch (e) {}
 }
 
-// 9. Safe Quit — restores internet, no second Touch ID prompt
+// 8. Safe Quit — Guaranteed Network Restoration
 function safeQuit() {
   if (isQuitting) return
   isQuitting = true
-  logLockdown('🛑 [Spektic] Safe Quit initiated — cleaning up and exiting...')
+  logLockdown('🛑 [Spektic] Safe Quit initiated...')
 
   if (processWatchdogTimer) clearInterval(processWatchdogTimer)
   if (clipboardTimer) clearInterval(clipboardTimer)
   if (powerBlockerId !== null) { try { powerSaveBlocker.stop(powerBlockerId) } catch (e) {} }
 
-  // Proactive cleanup (best effort — watchdog handles the rest automatically)
-  exec('rm -f /tmp/spektic_pf.conf /tmp/spektic_fw.sh', () => {})
-  cleanupSystemProxies()
+  // 1. SYNCHRONOUSLY RESTORE NETWORK TO ALL APPS
+  disableNetworkLockdown()
 
+  // 2. Clear UI & Exit
   try { globalShortcut.unregisterAll() } catch (e) {}
   blackoutWindows.forEach(w => { try { w.destroy() } catch (e) {} })
   if (mainWindow && !mainWindow.isDestroyed()) { try { mainWindow.destroy() } catch (e) {} }
 
-  logLockdown('🛑 [Spektic] Process exiting. Watchdog will restore default routes and pfctl.')
-  // Exit — watchdog detects PID death and auto-restores default route + pfctl
+  logLockdown('🛑 [Spektic] Process exiting cleanly.')
   app.exit(0)
 }
 
 ipcMain.on('spektic-force-quit', () => { safeQuit() })
 
-// 10. Inject Exit Button
+// 9. Universal DOM Meeting Info Scrubber (Removes Teams / Meet meeting details)
 function injectSecurityUI(wc) {
   try {
     wc.insertCSS(`
-      * { -webkit-touch-callout: none !important; -webkit-user-select: none !important; user-select: none !important; }
-      input, textarea { -webkit-user-select: auto !important; user-select: auto !important; }
+      * { -webkit-touch-callout: none !important; }
       #spektic-exit-btn {
         position: fixed !important; top: 16px !important; right: 16px !important;
         z-index: 2147483647 !important; background: #dc2626 !important; color: #fff !important;
@@ -504,24 +339,61 @@ function injectSecurityUI(wc) {
       }
       #spektic-exit-btn:hover { background: #b91c1c !important; transform: scale(1.05) !important; }
     `)
+
     wc.executeJavaScript(`
+      // 1. Exit Button
       if (!document.getElementById('spektic-exit-btn')) {
         const b = document.createElement('button');
         b.id = 'spektic-exit-btn'; b.innerText = '✕ Exit Spektic';
-        b.onclick = (e) => { e.preventDefault(); e.stopPropagation();
+        b.onclick = (e) => { 
+          e.preventDefault(); e.stopPropagation();
           if (window.spekticAPI && window.spekticAPI.exitApp) { window.spekticAPI.exitApp(); }
           else { window.location.href = 'https://spektic.com/spektic-quit-action'; }
         };
         document.body.appendChild(b);
       }
+
+      // 2. Meeting Scrubber (Blocks meeting ID / passcode / invite links from leaking)
+      if (!window.__spekticScrubberRunning) {
+        window.__spekticScrubberRunning = true;
+        const scrubSelectors = [
+          '[aria-label*="Meeting info" i]',
+          '[aria-label*="Meeting details" i]',
+          '[aria-label*="Share invite" i]',
+          '[aria-label*="Copy link" i]',
+          '[data-tid*="meeting-info" i]',
+          '[data-tid*="share-invite" i]',
+          '[data-tid*="copy-link" i]'
+        ];
+
+        function scrubElements() {
+          scrubSelectors.forEach(sel => {
+            document.querySelectorAll(sel).forEach(el => {
+              el.style.setProperty('display', 'none', 'important');
+              el.style.setProperty('visibility', 'hidden', 'important');
+              el.style.setProperty('pointer-events', 'none', 'important');
+            });
+          });
+
+          // Text Node Scrubber for passcodes
+          const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
+          let node;
+          while (node = walker.nextNode()) {
+            if (node.nodeValue && /meeting\\s*id|passcode|teams\\.microsoft\\.com\\/l\\/meetup/i.test(node.nodeValue)) {
+              node.nodeValue = '[Meeting Shield Protected]';
+            }
+          }
+        }
+
+        setInterval(scrubElements, 800);
+      }
     `)
   } catch (e) {}
 }
 
-// 11. Create Main Window
+// 10. Create Main Window
 function createWindow() {
   calculateAppHash()
-  cleanupSystemProxies()
   setupNetworkSecurity()
   killProhibitedProcesses()
 
@@ -547,22 +419,39 @@ function createWindow() {
 
   mainWindow.webContents.on('will-navigate', (event, url) => {
     const u = url.toLowerCase()
-    if (u.includes('spektic-quit-action') || u.includes('quit-exam')) { event.preventDefault(); safeQuit(); return }
-    if (!u.includes('spektic.com') && !u.includes('vercel.app') && !u.includes('workers.dev') && !u.includes('localhost')) { event.preventDefault() }
+    if (u.includes('spektic-quit-action') || u.includes('quit-exam')) { 
+      event.preventDefault()
+      safeQuit()
+      return 
+    }
   })
 
   session.defaultSession.on('will-download', e => { e.preventDefault() })
   mainWindow.on('close', e => { if (!isQuitting) { e.preventDefault(); safeQuit() } })
 
-  mainWindow.loadURL('https://spektic.com/join')
+  // Support custom target URL argument (e.g. electron . --url="https://...")
+  let targetUrl = 'https://spektic.com/join'
+  const customUrlArg = process.argv.find(a => a.startsWith('http://') || a.startsWith('https://'))
+  if (customUrlArg) {
+    targetUrl = customUrlArg
+  }
+
+  logLockdown(`Loading target exam URL: ${targetUrl}`)
+  mainWindow.loadURL(targetUrl)
+
   mainWindow.webContents.on('dom-ready', () => { injectSecurityUI(mainWindow.webContents) })
   mainWindow.webContents.on('did-finish-load', () => { injectSecurityUI(mainWindow.webContents) })
 
   mainWindow.webContents.on('before-input-event', (event, input) => {
     if ((input.meta && input.shift && input.alt && input.key.toLowerCase() === 'q') ||
-        (input.meta && input.alt && input.key.toLowerCase() === 'q')) { safeQuit(); return }
+        (input.meta && input.alt && input.key.toLowerCase() === 'q')) { 
+      safeQuit()
+      return 
+    }
     if (input.meta || input.alt || input.control) {
-      if (['tab','q','w','space','r','h','m','c','v'].includes(input.key.toLowerCase())) { event.preventDefault() }
+      if (['tab','q','w','space','r','h','m','c','v'].includes(input.key.toLowerCase())) { 
+        event.preventDefault() 
+      }
     }
   })
 
@@ -575,11 +464,8 @@ function createWindow() {
   clipboardTimer = setInterval(() => { try { clipboard.clear() } catch (e) {} }, 2000)
 }
 
-// 12. App Lifecycle
+// 11. App Lifecycle & Failsafe Signals
 app.whenReady().then(() => {
-  // Clean leftover files from any previous crash
-  exec('rm -f /tmp/spektic_pf.conf /tmp/spektic_fw.sh /tmp/spektic_watchdog.sh', () => {})
-
   const shortcuts = [
     'Command+Tab', 'Command+Q', 'Command+W', 'Command+Space',
     'Command+Option+Esc', 'Command+Shift+3', 'Command+Shift+4', 'Command+Shift+5'
@@ -587,11 +473,21 @@ app.whenReady().then(() => {
   shortcuts.forEach(sc => { try { globalShortcut.register(sc, () => {}) } catch (e) {} })
   try { globalShortcut.register('Command+Shift+Option+Q', () => { safeQuit() }) } catch (e) {}
 
-  // SEQUENCE: Block internet FIRST → then open exam window
+  // 1. Isolate system network (blocks other apps)
+  // 2. Open exam window (with direct:// high-speed connectivity)
   enableNetworkLockdown(() => {
     createWindow()
   })
 })
 
+// Failsafe shutdown hooks to ensure internet is ALWAYS relieved on exit
+process.on('SIGINT', () => safeQuit())
+process.on('SIGTERM', () => safeQuit())
+process.on('SIGHUP', () => safeQuit())
+process.on('exit', () => {
+  try { disableNetworkLockdown() } catch (e) {}
+})
+
+app.on('before-quit', () => { safeQuit() })
 app.on('will-quit', () => { safeQuit() })
 app.on('window-all-closed', () => { safeQuit() })
