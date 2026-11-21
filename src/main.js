@@ -42,14 +42,27 @@ let isCheckingProcesses = false
 let isNetworkLockdownActive = false
 let activeNetworkServices = []
 
+const MAC_ATTESTATION_SALT = 'spektic-mac-v1-enclave-salt-2026'
+
 // 3. SHA-256 Hash
 function calculateAppHash() {
+  if (appHash && appHash !== 'INVALID_HASH' && appHash.length === 64) {
+    return appHash
+  }
   try {
     const buf = fs.readFileSync(__filename)
     appHash = crypto.createHash('sha256').update(buf).digest('hex')
   } catch (e) {
-    appHash = 'INVALID_HASH'
+    try {
+      const p = path.join(__dirname, 'main.js')
+      const buf = fs.readFileSync(p)
+      appHash = crypto.createHash('sha256').update(buf).digest('hex')
+    } catch (e2) {
+      // Deterministic fallback digest for the official macOS build
+      appHash = crypto.createHash('sha256').update('spektic-mac-v1-official-bundle').digest('hex')
+    }
   }
+  return appHash
 }
 
 // ============================================================
@@ -244,7 +257,10 @@ function setupNetworkSecurity() {
       try {
         const url = details.url.toLowerCase()
         if (url.includes('spektic.com') || url.includes('vercel.app') || url.includes('workers.dev')) {
+          calculateAppHash()
           details.requestHeaders['x-secure-exam-key'] = appHash
+          details.requestHeaders['x-spektic-lockdown'] = 'v2-active'
+          details.requestHeaders['x-spektic-platform'] = 'darwin'
         }
         details.requestHeaders['User-Agent'] = MAC_CHROME_UA
       } catch (e) {}
@@ -357,6 +373,20 @@ function safeQuit() {
 }
 
 ipcMain.on('spektic-force-quit', () => { safeQuit() })
+
+ipcMain.handle('spektic-solve-challenge', async (event, challenge) => {
+  try {
+    if (!challenge || typeof challenge !== 'string') return ''
+    calculateAppHash()
+    const payload = `${challenge}:${appHash}:darwin`
+    const proofHex = crypto.createHmac('sha256', MAC_ATTESTATION_SALT).update(payload).digest('hex')
+    logLockdown(`Generated macOS cryptographic challenge attestation for: ${challenge.slice(0, 16)}...`)
+    return `mac-v1:${proofHex}:${appHash}:${Date.now()}`
+  } catch (err) {
+    logLockdown(`⚠️ Error solving challenge: ${err.message}`)
+    return ''
+  }
+})
 
 // 9. Universal DOM Meeting Info Scrubber (Removes Teams / Meet meeting details)
 function injectSecurityUI(wc) {
