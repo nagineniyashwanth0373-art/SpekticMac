@@ -303,6 +303,7 @@ const PROHIBITED_MAC_APPS = [
   'QuickTime Player', 'Loom', 'Screenflow', 'Camtasia', 'obs', 'obs64',
   'FaceTime', 'Webex',
   'Skype', 'Slack', 'Discord', 'Telegram', 'WhatsApp', 'TeamViewer', 'AnyDesk',
+  'RustDesk', 'Parsec', 'UltraViewer', 'CleanShot X', 'Shottr',
   'Notes', 'TextEdit', 'Calculator', 'Pages', 'Microsoft Word',
   'Preview', 'Sublime Text', 'VSCode', 'Terminal', 'iTerm', 'Activity Monitor'
 ]
@@ -456,7 +457,56 @@ function injectSecurityUI(wc) {
   } catch (e) {}
 }
 
-// 10. Create Main Window
+// 10. Meeting vs Exam Mode (Matches Windows SetMeetingMode)
+// In exams: content protection is ON (solid black box in captures to block cheats/recordings).
+// In Google Meet / Zoom meetings: content protection is OFF so the recruiter can clearly see the candidate's screen share!
+let isMeetingMode = false
+
+function setMeetingMode(active) {
+  if (isMeetingMode === active) return
+  isMeetingMode = active
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      if (active) {
+        logLockdown('🎥 [Meeting Mode Active] Relaxing content protection to allow clean screen sharing in Google Meet / Zoom.')
+        mainWindow.setContentProtection(false)
+      } else {
+        logLockdown('🔒 [Exam Mode Active] Enforcing content protection to block all external screen capture tools.')
+        mainWindow.setContentProtection(true)
+      }
+    } catch (e) {
+      logLockdown(`⚠️ Error toggling content protection: ${e.message}`)
+    }
+  }
+}
+
+function checkAndApplyMeetingMode(url) {
+  if (!url || typeof url !== 'string') return
+  try {
+    const parsed = new URL(url)
+    const host = parsed.hostname.toLowerCase()
+    const isMeetingHost = (
+      host === 'meet.google.com' || host.endsWith('.meet.google.com') ||
+      host === 'zoom.us' || host.endsWith('.zoom.us') ||
+      host === 'webex.com' || host.endsWith('.webex.com') ||
+      parsed.pathname.includes('/meeting') || parsed.pathname.includes('/live-interview')
+    )
+
+    if (isMeetingHost) {
+      setMeetingMode(true)
+    } else if (
+      host.includes('spektic.com') ||
+      host.includes('vercel.app') ||
+      host.includes('workers.dev') ||
+      host.includes('localhost') ||
+      host.includes('127.0.0.1')
+    ) {
+      setMeetingMode(false)
+    }
+  } catch (e) {}
+}
+
+// 11. Create Main Window
 function createWindow() {
   calculateAppHash()
   setupNetworkSecurity()
@@ -476,12 +526,14 @@ function createWindow() {
     }
   })
 
+  // Start in strict protected mode by default
   mainWindow.setContentProtection(true)
   mainWindow.setAlwaysOnTop(true, 'screen-saver')
   mainWindow.setVisibleOnAllWorkspaces(true)
   mainWindow.webContents.setUserAgent(MAC_CHROME_UA)
   mainWindow.webContents.on('context-menu', e => { e.preventDefault() })
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    checkAndApplyMeetingMode(url)
     mainWindow.loadURL(url)
     return { action: 'deny' }
   })
@@ -493,6 +545,16 @@ function createWindow() {
       safeQuit()
       return 
     }
+    checkAndApplyMeetingMode(url)
+  })
+
+  mainWindow.webContents.on('did-navigate', (event, url) => {
+    checkAndApplyMeetingMode(url)
+    injectSecurityUI(mainWindow.webContents)
+  })
+
+  mainWindow.webContents.on('did-navigate-in-page', (event, url) => {
+    checkAndApplyMeetingMode(url)
   })
 
   session.defaultSession.on('will-download', e => { e.preventDefault() })
@@ -506,6 +568,7 @@ function createWindow() {
   }
 
   logLockdown(`Loading target exam URL: ${targetUrl}`)
+  checkAndApplyMeetingMode(targetUrl)
   mainWindow.loadURL(targetUrl)
 
   mainWindow.webContents.on('dom-ready', () => { injectSecurityUI(mainWindow.webContents) })

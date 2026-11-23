@@ -1,6 +1,6 @@
 {
   "name": "spektic-mac",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Spektic Secure Exam Browser for macOS",
   "main": "src/main.js",
   "scripts": {
