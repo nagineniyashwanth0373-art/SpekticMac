@@ -34,6 +34,7 @@ process.on('unhandledRejection', (reason) => {
 let mainWindow = null
 let appHash = ''
 let processWatchdogTimer = null
+let socketHunterTimer = null
 let clipboardTimer = null
 let powerBlockerId = null
 let blackoutWindows = []
@@ -119,8 +120,66 @@ function getActiveNetworkServices() {
   }
 }
 
+// Anti-VM Hardware Detection on macOS
+function isMacVirtualMachine() {
+  if (process.platform !== 'darwin') return false
+  try {
+    const hv = execSync('sysctl -n kern.hv_vmm_present 2>/dev/null', { encoding: 'utf8' }).trim()
+    if (hv === '1') return true
+  } catch (e) {}
+  try {
+    const model = execSync('sysctl -n hw.model 2>/dev/null', { encoding: 'utf8' }).trim().toLowerCase()
+    if (model.includes('virtualmac') || model.includes('vmware') || model.includes('parallels') || model.includes('qemu')) {
+      return true
+    }
+  } catch (e) {}
+  try {
+    const dtypes = execSync('system_profiler SPHardwareDataType 2>/dev/null', { encoding: 'utf8' }).toLowerCase()
+    if (dtypes.includes('virtual') || dtypes.includes('vmware') || dtypes.includes('parallels') || dtypes.includes('qemu')) {
+      return true
+    }
+  } catch (e) {}
+  return false
+}
+
+// Real-Time Socket Hunter (Kills any non-Spektic app attempting an internet connection)
+const SYSTEM_WHITELISTED_PIDS = new Set([0, 1])
+
+function killUnauthorizedSockets() {
+  if (process.platform !== 'darwin' || isQuitting) return
+  exec('lsof -iTCP -sTCP:ESTABLISHED -n -P -F pcu 2>/dev/null', (err, stdout) => {
+    if (err || !stdout || isQuitting) return
+    const lines = stdout.split('\n')
+    let currentPid = null
+    let currentCmd = ''
+    for (const line of lines) {
+      if (line.startsWith('p')) {
+        currentPid = parseInt(line.substring(1), 10)
+      } else if (line.startsWith('c')) {
+        currentCmd = line.substring(1).toLowerCase()
+        if (currentPid && !SYSTEM_WHITELISTED_PIDS.has(currentPid)) {
+          const isSpektic = currentPid === process.pid || currentCmd.includes('spektic') || currentCmd.includes('electron')
+          const isSystem = (
+            currentCmd.includes('mdnsresponder') ||
+            currentCmd.includes('launchd') ||
+            currentCmd.includes('trustd') ||
+            currentCmd.includes('opendirectoryd') ||
+            currentCmd.includes('kernel_task') ||
+            currentCmd.includes('systempreferences') ||
+            currentCmd.includes('controlcenter')
+          )
+          if (!isSpektic && !isSystem) {
+            logLockdown(`🚨 [Socket Hunter] Terminating unauthorized network process: PID ${currentPid} (${currentCmd})`)
+            try { exec(`kill -9 ${currentPid} 2>/dev/null`) } catch (e) {}
+          }
+        }
+      }
+    }
+  })
+}
+
 function enableNetworkLockdown(callback) {
-  logLockdown('================ STARTING macOS NETWORK ISOLATION ================')
+  logLockdown('================ STARTING macOS METHOD 2 KERNEL LOCKDOWN ================')
   logLockdown(`Process platform: ${process.platform}, PID: ${process.pid}`)
 
   if (process.platform !== 'darwin') {
@@ -129,44 +188,101 @@ function enableNetworkLockdown(callback) {
     return
   }
 
+  // 1. Hardware Virtual Machine Check
+  if (isMacVirtualMachine()) {
+    logLockdown('🚨 CRITICAL: macOS Virtual Machine detected! Terminating immediately.')
+    try {
+      const { dialog } = require('electron')
+      dialog.showErrorBox(
+        'Security Violation',
+        'Virtual Machines are strictly prohibited for this exam. Please run Spektic on physical Mac hardware.'
+      )
+    } catch (e) {}
+    app.exit(0)
+    return
+  }
+
+  // 0. Ensure completely clean baseline network state first
+  try { disableNetworkLockdown() } catch (e) {}
+
   activeNetworkServices = getActiveNetworkServices()
   logLockdown('Detected active network services:', activeNetworkServices)
 
-  // Cut down internet for all other apps by blackholing system proxies
-  activeNetworkServices.forEach(svc => {
-    try {
-      execSync(`networksetup -setwebproxy "${svc}" 127.0.0.1 9999`, { timeout: 3000 })
-      execSync(`networksetup -setsecurewebproxy "${svc}" 127.0.0.1 9999`, { timeout: 3000 })
-      execSync(`networksetup -setsocksfirewallproxy "${svc}" 127.0.0.1 9999`, { timeout: 3000 })
-      logLockdown(`🔒 Severed external internet on service: "${svc}" via blackhole proxy 127.0.0.1:9999`)
-    } catch (e) {
-      logLockdown(`⚠️ Error setting blackhole proxy on "${svc}": ${e.message}`)
-    }
-  })
-
-  // Start self-healing fallback watchdog script that monitors PID death
+  // 2. Spawn Detached Dead-Man Recovery Watchdog BEFORE touching any network settings!
+  // This watchdog runs completely independent of Node/Electron in the OS background.
+  // The millisecond Spektic exits or crashes, it automatically relieves the network within 0.5s!
   try {
     const pid = process.pid
     const watchdogScript = `#!/bin/bash
-# Spektic Mac Emergency Fallback Watchdog
-while kill -0 ${pid} 2>/dev/null; do sleep 1; done
-echo "[Watchdog] PID ${pid} exited. Relieving network to all apps..." >> /tmp/spektic_network_lockdown.log
-SERVICES=$(networksetup -listallnetworkservices 2>/dev/null | grep -v 'An asterisk' | grep -v '\\*')
-for s in $SERVICES; do
-  networksetup -setwebproxystate "$s" off 2>/dev/null
-  networksetup -setsecurewebproxystate "$s" off 2>/dev/null
-  networksetup -setsocksfirewallproxystate "$s" off 2>/dev/null
+# Spektic Mac Dead-Man Recovery Watchdog
+# Monitors PID ${pid} continuously every 0.5s
+while kill -0 ${pid} 2>/dev/null; do
+  sleep 0.5
 done
+
+# PID is dead (either normal exit, crash, kill -9, or panic)
+echo "[Watchdog] PID ${pid} exited. Activating emergency network recovery..." >> /tmp/spektic_network_lockdown.log
+
+# 1. Flush and disable kernel pfctl firewall anchor
+/sbin/pfctl -a "com.spektic.lockdown" -F all 2>/dev/null
 /sbin/pfctl -d 2>/dev/null
 /sbin/pfctl -f /etc/pf.conf 2>/dev/null
-rm -f /tmp/spektic_watchdog.sh
+
+# 2. Reset proxies across all network adapters (handles spaces in service names safely)
+networksetup -listallnetworkservices 2>/dev/null | grep -v 'An asterisk' | grep -v '\\*' | while IFS= read -r s; do
+  if [ -n "$s" ]; then
+    networksetup -setwebproxystate "$s" off 2>/dev/null
+    networksetup -setsecurewebproxystate "$s" off 2>/dev/null
+    networksetup -setsocksfirewallproxystate "$s" off 2>/dev/null
+    networksetup -setautoproxystate "$s" off 2>/dev/null
+  fi
+done
+
+# 3. Clean up
+rm -f /tmp/spektic_watchdog.sh /tmp/spektic_pf.conf /tmp/spektic_fw.sh /tmp/spektic_gw.txt 2>/dev/null
+echo "[Watchdog] Network completely restored to normal." >> /tmp/spektic_network_lockdown.log
 `
     fs.writeFileSync('/tmp/spektic_watchdog.sh', watchdogScript, { mode: 0o755 })
     exec('nohup /tmp/spektic_watchdog.sh > /dev/null 2>&1 &')
+    logLockdown('🛡️ Dead-Man Watchdog spawned. Self-healing network recovery guaranteed on crash/exit.')
+  } catch (e) {
+    logLockdown(`⚠️ Error spawning watchdog: ${e.message}`)
+  }
+
+  // 3. Apply Kernel Packet Filter anchor
+  try {
+    const pfRules = `
+# Spektic Kernel Lockdown Anchor (com.spektic.lockdown)
+set skip on lo0
+pass out proto udp to any port 53 keep state
+pass out proto tcp to any port 53 keep state
+`
+    fs.writeFileSync('/tmp/spektic_pf.conf', pfRules, { mode: 0o644 })
+    exec('/sbin/pfctl -e -a "com.spektic.lockdown" -f /tmp/spektic_pf.conf 2>/dev/null', (err) => {
+      if (err) {
+        logLockdown('Kernel pfctl requires root, continuing with Socket Assassin + Proxy Blackhole.')
+      } else {
+        logLockdown('🛡️ Kernel Packet Filter anchor loaded successfully.')
+      }
+    })
   } catch (e) {}
 
+  // 4. Blackhole system proxies for standard apps
+  activeNetworkServices.forEach(svc => {
+    try {
+      exec(`networksetup -setwebproxy "${svc}" 127.0.0.1 9999 2>/dev/null`, () => {})
+      exec(`networksetup -setsecurewebproxy "${svc}" 127.0.0.1 9999 2>/dev/null`, () => {})
+      exec(`networksetup -setsocksfirewallproxy "${svc}" 127.0.0.1 9999 2>/dev/null`, () => {})
+      logLockdown(`🔒 Severed external internet on service: "${svc}" via blackhole proxy 127.0.0.1:9999`)
+    } catch (e) {}
+  })
+
+  // 5. Start Real-Time Socket Hunter (kills any other app attempting an internet connection)
+  if (socketHunterTimer) clearInterval(socketHunterTimer)
+  socketHunterTimer = setInterval(killUnauthorizedSockets, 800)
+
   isNetworkLockdownActive = true
-  logLockdown('✅ Network isolation active. All external apps blocked from internet.')
+  logLockdown('✅ Full multi-layer network isolation active. All external apps blocked from internet.')
   if (callback) callback()
 }
 
@@ -174,34 +290,33 @@ function disableNetworkLockdown() {
   if (process.platform !== 'darwin') return
   logLockdown('🔓 Relieving network lockdown: Restoring internet to all apps...')
 
+  if (socketHunterTimer) {
+    clearInterval(socketHunterTimer)
+    socketHunterTimer = null
+  }
+
+  // 1. Immediately reset proxies across all network adapters
   const services = activeNetworkServices.length > 0 ? activeNetworkServices : getActiveNetworkServices()
   services.forEach(svc => {
     try {
-      execSync(`networksetup -setwebproxystate "${svc}" off`, { timeout: 3000 })
-      execSync(`networksetup -setsecurewebproxystate "${svc}" off`, { timeout: 3000 })
-      execSync(`networksetup -setsocksfirewallproxystate "${svc}" off`, { timeout: 3000 })
+      execSync(`networksetup -setwebproxystate "${svc}" off 2>/dev/null`, { timeout: 3000 })
+      execSync(`networksetup -setsecurewebproxystate "${svc}" off 2>/dev/null`, { timeout: 3000 })
+      execSync(`networksetup -setsocksfirewallproxystate "${svc}" off 2>/dev/null`, { timeout: 3000 })
+      execSync(`networksetup -setautoproxystate "${svc}" off 2>/dev/null`, { timeout: 3000 })
       logLockdown(`✅ Relieved internet on service: "${svc}" (Proxies disabled)`)
     } catch (e) {
       logLockdown(`⚠️ Error disabling proxy on "${svc}": ${e.message}`)
     }
   })
 
-  // Ensure pfctl and legacy routes are fully restored if touched
+  // 2. Flush and disable kernel pfctl anchor
   try {
-    execSync('/sbin/pfctl -d 2>/dev/null; /sbin/pfctl -f /etc/pf.conf 2>/dev/null', { timeout: 3000 })
+    execSync('/sbin/pfctl -a "com.spektic.lockdown" -F all 2>/dev/null; /sbin/pfctl -d 2>/dev/null; /sbin/pfctl -f /etc/pf.conf 2>/dev/null', { timeout: 3000 })
   } catch (e) {}
 
+  // 3. Remove temporary files
   try {
-    if (fs.existsSync('/tmp/spektic_gw.txt')) {
-      const gw = fs.readFileSync('/tmp/spektic_gw.txt', 'utf8').trim()
-      if (gw) {
-        execSync(`/sbin/route add default "${gw}" 2>/dev/null`, { timeout: 3000 })
-      }
-    }
-  } catch (e) {}
-
-  try {
-    execSync('rm -f /tmp/spektic_pf.conf /tmp/spektic_fw.sh /tmp/spektic_watchdog.sh /tmp/spektic_gw.txt', { timeout: 2000 })
+    execSync('rm -f /tmp/spektic_pf.conf /tmp/spektic_fw.sh /tmp/spektic_watchdog.sh /tmp/spektic_gw.txt 2>/dev/null', { timeout: 2000 })
   } catch (e) {}
 
   isNetworkLockdownActive = false
@@ -619,6 +734,13 @@ app.whenReady().then(async () => {
 })
 
 // Failsafe shutdown hooks to ensure internet is ALWAYS relieved on exit
+process.on('uncaughtException', (err) => {
+  try { logLockdown(`🚨 Uncaught Exception: ${err ? (err.stack || err.message) : 'unknown'}`) } catch (e) {}
+  safeQuit()
+})
+process.on('unhandledRejection', (reason) => {
+  try { logLockdown(`🚨 Unhandled Rejection: ${reason}`) } catch (e) {}
+})
 process.on('SIGINT', () => safeQuit())
 process.on('SIGTERM', () => safeQuit())
 process.on('SIGHUP', () => safeQuit())
