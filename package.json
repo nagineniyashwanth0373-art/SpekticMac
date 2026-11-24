@@ -29,13 +29,6 @@
       "category": "public.app-category.education",
       "target": [
         {
-          "target": "pkg",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
-        },
-        {
           "target": "dmg",
           "arch": [
             "x64",
@@ -57,12 +50,6 @@
         "NSMicrophoneUsageDescription": "Spektic requires microphone access for audio interviews.",
         "NSScreenCaptureDescription": "Spektic requires screen recording permission to stream and verify your interview screen."
       }
-    },
-    "pkg": {
-      "identity": null,
-      "scripts": "build/pkg-scripts",
-      "installLocation": "/Applications",
-      "allowDowngrade": true
     },
     "directories": {
       "output": "dist"

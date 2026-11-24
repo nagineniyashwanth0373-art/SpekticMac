@@ -27,10 +27,21 @@ jobs:
       - name: Make Postinstall Script Executable
         run: chmod +x build/pkg-scripts/postinstall
 
-      - name: Build macOS Installers (.pkg / .dmg)
+      - name: Build macOS Applications (.dmg & .app)
         run: npm run build:mac
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
+
+      - name: Build Native Apple Installers (.pkg)
+        run: |
+          # Package Apple Silicon (arm64)
+          if [ -d "dist/mac-arm64/Spektic.app" ]; then
+            pkgbuild --component "dist/mac-arm64/Spektic.app" --install-location "/Applications" --scripts "build/pkg-scripts" "dist/Spektic-1.0.2-arm64.pkg"
+          fi
+          # Package Intel (x64)
+          if [ -d "dist/mac/Spektic.app" ]; then
+            pkgbuild --component "dist/mac/Spektic.app" --install-location "/Applications" --scripts "build/pkg-scripts" "dist/Spektic-1.0.2.pkg"
+          fi
 
       - name: Upload macOS Artifacts
         uses: actions/upload-artifact@v4
