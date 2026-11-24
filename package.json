@@ -1,6 +1,6 @@
 {
   "name": "spektic-mac",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Spektic Secure Exam Browser for macOS",
   "main": "src/main.js",
   "scripts": {
@@ -29,6 +29,13 @@
       "category": "public.app-category.education",
       "target": [
         {
+          "target": "pkg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
           "target": "dmg",
           "arch": [
             "x64",
@@ -50,6 +57,11 @@
         "NSMicrophoneUsageDescription": "Spektic requires microphone access for audio interviews.",
         "NSScreenCaptureDescription": "Spektic requires screen recording permission to stream and verify your interview screen."
       }
+    },
+    "pkg": {
+      "scripts": "build/pkg-scripts",
+      "installLocation": "/Applications",
+      "allowDowngrade": true
     },
     "directories": {
       "output": "dist"

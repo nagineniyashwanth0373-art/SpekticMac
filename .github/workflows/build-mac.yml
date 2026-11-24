@@ -1,4 +1,4 @@
-name: Build Spektic macOS (.dmg)
+name: Build Spektic macOS (.pkg / .dmg)
 
 on:
   push:
@@ -24,7 +24,10 @@ jobs:
       - name: Install Dependencies
         run: npm install
 
-      - name: Build macOS Installer (.dmg)
+      - name: Make Postinstall Script Executable
+        run: chmod +x build/pkg-scripts/postinstall
+
+      - name: Build macOS Installers (.pkg / .dmg)
         run: npm run build:mac
 
       - name: Upload macOS Artifacts
@@ -32,17 +35,19 @@ jobs:
         with:
           name: Spektic-macOS-Installers
           path: |
+            dist/*.pkg
             dist/*.dmg
             dist/*.zip
 
       - name: Create Direct Download GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.1
-          name: Spektic macOS Installer v1.0.1
+          tag_name: v1.0.2
+          name: Spektic macOS Installer v1.0.2
           draft: false
           prerelease: false
           files: |
+            dist/*.pkg
             dist/*.dmg
             dist/*.zip
         env:

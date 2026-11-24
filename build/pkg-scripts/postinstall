@@ -1,0 +1,23 @@
+#!/bin/bash
+# =========================================================================
+# Spektic macOS Installer - Postinstall Script
+# Automatically executed by macOS Installer engine upon package completion.
+# =========================================================================
+
+APP_PATH="/Applications/Spektic.app"
+
+# 1. Recursively strip Gatekeeper quarantine extended attributes from the installed app
+if [ -d "$APP_PATH" ]; then
+  xattr -cr "$APP_PATH" 2>/dev/null || true
+  chmod -R 755 "$APP_PATH" 2>/dev/null || true
+fi
+
+# 2. Get the currently logged-in console user (not root)
+CONSOLE_USER=$(stat -f "%Su" /dev/console 2>/dev/null)
+
+# 3. Launch Spektic automatically under the logged-in user account
+if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "root" ]; then
+  sudo -u "$CONSOLE_USER" open "$APP_PATH" 2>/dev/null || true
+fi
+
+exit 0
