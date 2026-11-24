@@ -59,6 +59,7 @@
       }
     },
     "pkg": {
+      "identity": null,
       "scripts": "build/pkg-scripts",
       "installLocation": "/Applications",
       "allowDowngrade": true
